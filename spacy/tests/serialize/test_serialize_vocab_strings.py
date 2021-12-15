@@ -3,7 +3,7 @@ import pickle
 from thinc.api import get_current_ops
 from spacy.vocab import Vocab
 from spacy.strings import StringStore
-from spacy.vectors import Vectors
+from spacy.vectors_ndarray import NdArrayVectors
 
 from ..util import make_tempdir
 
@@ -132,7 +132,7 @@ def test_serialize_stringstore_roundtrip_disk(strings1, strings2):
 def test_pickle_vocab(strings, lex_attr):
     vocab = Vocab(strings=strings)
     ops = get_current_ops()
-    vectors = Vectors(data=ops.xp.zeros((10, 10)), mode="floret", hash_count=1)
+    vectors = NdArrayVectors(data=ops.xp.zeros((10, 10)), mode="floret", hash_count=1)
     vocab.vectors = vectors
     vocab[strings[0]].norm_ = lex_attr
     vocab_pickled = pickle.dumps(vocab)

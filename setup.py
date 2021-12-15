@@ -64,6 +64,7 @@ MOD_NAMES = [
     "spacy.matcher.dependencymatcher",
     "spacy.symbols",
     "spacy.vectors",
+    "spacy.vectors_ndarray",
 ]
 COMPILE_OPTIONS = {
     "msvc": ["/Ox", "/EHsc"],

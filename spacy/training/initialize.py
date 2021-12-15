@@ -14,6 +14,7 @@ import warnings
 from .pretrain import get_tok2vec_ref
 from ..lookups import Lookups
 from ..vectors import Vectors, Mode as VectorsMode
+from ..vectors_ndarray import NdArrayVectors
 from ..errors import Errors, Warnings
 from ..schemas import ConfigSchemaTraining
 from ..util import registry, load_model_from_config, resolve_dot_names, logger
@@ -207,7 +208,7 @@ def convert_vectors(
 ) -> None:
     vectors_loc = ensure_path(vectors_loc)
     if vectors_loc and vectors_loc.parts[-1].endswith(".npz"):
-        nlp.vocab.vectors = Vectors(
+        nlp.vocab.vectors = NdArrayVectors(
             strings=nlp.vocab.strings, data=numpy.load(vectors_loc.open("rb"))
         )
         for lex in nlp.vocab:
@@ -230,13 +231,13 @@ def convert_vectors(
                     nlp.vocab[word]
         if vectors_data is not None:
             if mode == VectorsMode.floret:
-                nlp.vocab.vectors = Vectors(
+                nlp.vocab.vectors = NdArrayVectors(
                     strings=nlp.vocab.strings,
                     data=vectors_data,
                     **floret_settings,
                 )
             else:
-                nlp.vocab.vectors = Vectors(
+                nlp.vocab.vectors = NdArrayVectors(
                     strings=nlp.vocab.strings, data=vectors_data, keys=vector_keys
                 )
     if name is None:

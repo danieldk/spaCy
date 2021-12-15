@@ -4,7 +4,7 @@ from numpy.testing import assert_allclose, assert_equal, assert_almost_equal
 from thinc.api import get_current_ops
 from spacy.lang.en import English
 from spacy.vocab import Vocab
-from spacy.vectors import Vectors
+from spacy.vectors_ndarray import NdArrayVectors
 from spacy.tokenizer import Tokenizer
 from spacy.strings import hash_string  # type: ignore
 from spacy.tokens import Doc
@@ -66,14 +66,14 @@ def tokenizer_v(vocab):
 
 
 def test_init_vectors_with_resize_shape(strings, resize_data):
-    v = Vectors(shape=(len(strings), 3))
+    v = NdArrayVectors(shape=(len(strings), 3))
     v.resize(shape=resize_data.shape)
     assert v.shape == resize_data.shape
     assert v.shape != (len(strings), 3)
 
 
 def test_init_vectors_with_resize_data(data, resize_data):
-    v = Vectors(data=data)
+    v = NdArrayVectors(data=data)
     v.resize(shape=resize_data.shape)
     assert v.shape == resize_data.shape
     assert v.shape != data.shape
@@ -83,7 +83,7 @@ def test_get_vector_resize(strings, data):
     strings = [hash_string(s) for s in strings]
 
     # decrease vector dimension (truncate)
-    v = Vectors(data=data)
+    v = NdArrayVectors(data=data)
     resized_dim = v.shape[1] - 1
     v.resize(shape=(v.shape[0], resized_dim))
     for i, string in enumerate(strings):
@@ -93,7 +93,7 @@ def test_get_vector_resize(strings, data):
     assert list(v[strings[1]]) == list(data[1, :resized_dim])
 
     # increase vector dimension (pad with zeros)
-    v = Vectors(data=data)
+    v = NdArrayVectors(data=data)
     resized_dim = v.shape[1] + 1
     v.resize(shape=(v.shape[0], resized_dim))
     for i, string in enumerate(strings):
@@ -104,18 +104,18 @@ def test_get_vector_resize(strings, data):
 
 
 def test_init_vectors_with_data(strings, data):
-    v = Vectors(data=data)
+    v = NdArrayVectors(data=data)
     assert v.shape == data.shape
 
 
 def test_init_vectors_with_shape(strings):
-    v = Vectors(shape=(len(strings), 3))
+    v = NdArrayVectors(shape=(len(strings), 3))
     assert v.shape == (len(strings), 3)
     assert v.is_full is False
 
 
 def test_get_vector(strings, data):
-    v = Vectors(data=data)
+    v = NdArrayVectors(data=data)
     strings = [hash_string(s) for s in strings]
     for i, string in enumerate(strings):
         v.add(string, row=i)
@@ -126,7 +126,7 @@ def test_get_vector(strings, data):
 
 def test_set_vector(strings, data):
     orig = data.copy()
-    v = Vectors(data=data)
+    v = NdArrayVectors(data=data)
     strings = [hash_string(s) for s in strings]
     for i, string in enumerate(strings):
         v.add(string, row=i)
@@ -138,7 +138,7 @@ def test_set_vector(strings, data):
 
 
 def test_vectors_most_similar(most_similar_vectors_data, most_similar_vectors_keys):
-    v = Vectors(data=most_similar_vectors_data, keys=most_similar_vectors_keys)
+    v = NdArrayVectors(data=most_similar_vectors_data, keys=most_similar_vectors_keys)
     _, best_rows, _ = v.most_similar(v.data, batch_size=2, n=2, sort=True)
     assert all(row[0] == i for i, row in enumerate(best_rows))
 
@@ -149,11 +149,11 @@ def test_vectors_most_similar(most_similar_vectors_data, most_similar_vectors_ke
 def test_vectors_most_similar_identical():
     """Test that most similar identical vectors are assigned a score of 1.0."""
     data = numpy.asarray([[4, 2, 2, 2], [4, 2, 2, 2], [1, 1, 1, 1]], dtype="f")
-    v = Vectors(data=data, keys=["A", "B", "C"])
+    v = NdArrayVectors(data=data, keys=["A", "B", "C"])
     keys, _, scores = v.most_similar(numpy.asarray([[4, 2, 2, 2]], dtype="f"))
     assert scores[0][0] == 1.0  # not 1.0000002
     data = numpy.asarray([[1, 2, 3], [1, 2, 3], [1, 1, 1]], dtype="f")
-    v = Vectors(data=data, keys=["A", "B", "C"])
+    v = NdArrayVectors(data=data, keys=["A", "B", "C"])
     keys, _, scores = v.most_similar(numpy.asarray([[1, 2, 3]], dtype="f"))
     assert scores[0][0] == 1.0  # not 0.9999999
 
@@ -306,9 +306,9 @@ def test_vocab_prune_vectors():
 
 def test_vectors_serialize():
     data = OPS.asarray([[4, 2, 2, 2], [4, 2, 2, 2], [1, 1, 1, 1]], dtype="f")
-    v = Vectors(data=data, keys=["A", "B", "C"])
+    v = NdArrayVectors(data=data, keys=["A", "B", "C"])
     b = v.to_bytes()
-    v_r = Vectors()
+    v_r = NdArrayVectors()
     v_r.from_bytes(b)
     assert_equal(OPS.to_numpy(v.data), OPS.to_numpy(v_r.data))
     assert v.key2row == v_r.key2row
@@ -345,20 +345,20 @@ def test_vector_is_oov():
 
 
 def test_init_vectors_unset():
-    v = Vectors(shape=(10, 10))
+    v = NdArrayVectors(shape=(10, 10))
     assert v.is_full is False
     assert v.data.shape == (10, 10)
 
     with pytest.raises(ValueError):
-        v = Vectors(shape=(10, 10), mode="floret")
+        v = NdArrayVectors(shape=(10, 10), mode="floret")
 
-    v = Vectors(data=OPS.xp.zeros((10, 10)), mode="floret", hash_count=1)
+    v = NdArrayVectors(data=OPS.xp.zeros((10, 10)), mode="floret", hash_count=1)
     assert v.is_full is True
 
 
 def test_vectors_clear():
     data = OPS.asarray([[4, 2, 2, 2], [4, 2, 2, 2], [1, 1, 1, 1]], dtype="f")
-    v = Vectors(data=data, keys=["A", "B", "C"])
+    v = NdArrayVectors(data=data, keys=["A", "B", "C"])
     assert v.is_full is True
     assert hash_string("A") in v
     v.clear()
@@ -373,7 +373,7 @@ def test_vectors_clear():
 
 def test_vectors_get_batch():
     data = OPS.asarray([[4, 2, 2, 2], [4, 2, 2, 2], [1, 1, 1, 1]], dtype="f")
-    v = Vectors(data=data, keys=["A", "B", "C"])
+    v = NdArrayVectors(data=data, keys=["A", "B", "C"])
     # check with mixed int/str keys
     words = ["C", "B", "A", v.strings["B"]]
     rows = v.find(keys=words)

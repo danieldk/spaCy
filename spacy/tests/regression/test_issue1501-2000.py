@@ -7,7 +7,7 @@ from spacy.training import Example
 from spacy.lang.en import English
 from spacy.lang.en.stop_words import STOP_WORDS
 from spacy.lang.lex_attrs import is_stop
-from spacy.vectors import Vectors
+from spacy.vectors_ndarray import NdArrayVectors
 from spacy.vocab import Vocab
 from spacy.language import Language
 from spacy.tokens import Doc, Span, Token
@@ -44,7 +44,7 @@ def test_issue1506():
 @pytest.mark.issue(1518)
 def test_issue1518():
     """Test vectors.resize() works."""
-    vectors = Vectors(shape=(10, 10))
+    vectors = NdArrayVectors(shape=(10, 10))
     vectors.add("hello", row=2)
     vectors.resize((5, 9))
 
@@ -80,7 +80,7 @@ def test_issue1537():
 @pytest.mark.issue(1539)
 def test_issue1539():
     """Ensure vectors.resize() doesn't try to modify dictionary during iteration."""
-    v = Vectors(shape=(10, 10), keys=[5, 3, 98, 100])
+    v = NdArrayVectors(shape=(10, 10), keys=[5, 3, 98, 100])
     v.resize((100, 100))
 
 
@@ -137,7 +137,7 @@ def test_issue1727():
     correctly after vectors are added."""
     nlp = Language(Vocab())
     data = numpy.ones((3, 300), dtype="f")
-    vectors = Vectors(data=data, keys=["I", "am", "Matt"])
+    vectors = NdArrayVectors(data=data, keys=["I", "am", "Matt"])
     tagger = nlp.create_pipe("tagger")
     tagger.add_label("PRP")
     assert tagger.cfg.get("pretrained_dims", 0) == 0

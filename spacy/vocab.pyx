@@ -15,6 +15,7 @@ from .compat import copy_reg
 from .errors import Errors
 from .attrs import intify_attrs, NORM, IS_STOP
 from .vectors import Vectors, Mode as VectorsMode
+from .vectors_ndarray import NdArrayVectors
 from .util import registry
 from .lookups import Lookups
 from . import util
@@ -77,7 +78,7 @@ cdef class Vocab:
                 _ = self[string]
         self.lex_attr_getters = lex_attr_getters
         self.morphology = Morphology(self.strings)
-        self.vectors = Vectors(strings=self.strings, name=vectors_name)
+        self.vectors = NdArrayVectors(strings=self.strings, name=vectors_name)
         self.lookups = lookups
         self.writing_system = writing_system
         self.get_noun_chunks = get_noun_chunks
@@ -292,10 +293,10 @@ cdef class Vocab:
         if width is not None and shape is not None:
             raise ValueError(Errors.E065.format(width=width, shape=shape))
         elif shape is not None:
-            self.vectors = Vectors(strings=self.strings, shape=shape)
+            self.vectors = NdArrayVectors(strings=self.strings, shape=shape)
         else:
             width = width if width is not None else self.vectors.data.shape[1]
-            self.vectors = Vectors(strings=self.strings, shape=(self.vectors.shape[0], width))
+            self.vectors = NdArrayVectors(strings=self.strings, shape=(self.vectors.shape[0], width))
 
     def prune_vectors(self, nr_row, batch_size=1024):
         """Reduce the current vector table to `nr_row` unique entries. Words
@@ -340,7 +341,7 @@ cdef class Vocab:
         keys = xp.asarray([key for (prob, i, key) in priority], dtype="uint64")
         keep = xp.ascontiguousarray(self.vectors.data[indices[:nr_row]])
         toss = xp.ascontiguousarray(self.vectors.data[indices[nr_row:]])
-        self.vectors = Vectors(strings=self.strings, data=keep, keys=keys[:nr_row], name=self.vectors.name)
+        self.vectors = NdArrayVectors(strings=self.strings, data=keep, keys=keys[:nr_row], name=self.vectors.name)
         syn_keys, syn_rows, scores = self.vectors.most_similar(toss, batch_size=batch_size)
         syn_keys = ops.to_numpy(syn_keys)
         remap = {}

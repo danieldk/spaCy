@@ -10,7 +10,7 @@ from spacy.vocab import Vocab
 from spacy.attrs import ENT_IOB, ENT_TYPE
 from spacy.compat import pickle
 from spacy import displacy
-from spacy.vectors import Vectors
+from spacy.vectors_ndarray import NdArrayVectors
 import numpy
 
 
@@ -222,7 +222,7 @@ def test_issue3345():
 @pytest.mark.issue(3412)
 def test_issue3412():
     data = numpy.asarray([[0, 0, 0], [1, 2, 3], [9, 8, 7]], dtype="f")
-    vectors = Vectors(data=data, keys=["A", "B", "C"])
+    vectors = NdArrayVectors(data=data, keys=["A", "B", "C"])
     keys, best_rows, scores = vectors.most_similar(
         numpy.asarray([[9, 8, 7], [0, 0, 0]], dtype="f")
     )

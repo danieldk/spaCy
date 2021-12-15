@@ -4,7 +4,7 @@ import pytest
 import srsly
 from numpy import zeros
 from spacy.kb import KnowledgeBase, Writer
-from spacy.vectors import Vectors
+from spacy.vectors_ndarray import NdArrayVectors
 from spacy.language import Language
 from spacy.pipeline import TrainablePipe
 from spacy.vocab import Vocab
@@ -19,7 +19,7 @@ def nlp():
 def vectors():
     data = zeros((3, 1), dtype="f")
     keys = ["cat", "dog", "rat"]
-    return Vectors(data=data, keys=keys)
+    return NdArrayVectors(data=data, keys=keys)
 
 
 def custom_pipe():

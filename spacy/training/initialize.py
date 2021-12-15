@@ -15,6 +15,7 @@ from .pretrain import get_tok2vec_ref
 from ..lookups import Lookups
 from ..vectors import Vectors, Mode as VectorsMode
 from ..vectors_ndarray import NdArrayVectors
+from ..vectors_finalfusion import FinalfusionVectors
 from ..errors import Errors, Warnings
 from ..schemas import ConfigSchemaTraining
 from ..util import registry, load_model_from_config, resolve_dot_names, logger
@@ -171,7 +172,10 @@ def load_vectors_into_model(
         logger.warning(Warnings.W112.format(name=name))
 
     for lex in nlp.vocab:
-        lex.rank = nlp.vocab.vectors.key2row.get(lex.orth, OOV_RANK)  # type: ignore[attr-defined]
+        if nlp.vocab.vectors.mode == VectorsMode.finalfusion:
+            lex.rank = OOV_RANK
+        else:
+            lex.rank = nlp.vocab.vectors.key2row.get(lex.orth, OOV_RANK)  # type: ignore[attr-defined]
 
 
 def init_tok2vec(
@@ -214,6 +218,8 @@ def convert_vectors(
         for lex in nlp.vocab:
             if lex.rank and lex.rank != OOV_RANK:
                 nlp.vocab.vectors.add(lex.orth, row=lex.rank)  # type: ignore[attr-defined]
+    elif mode == VectorsMode.finalfusion:
+        nlp.vocab.vectors = FinalfusionVectors(vectors_loc)
     else:
         if vectors_loc:
             logger.info(f"Reading vectors from {vectors_loc}")
@@ -246,7 +252,7 @@ def convert_vectors(
     else:
         nlp.vocab.vectors.name = name
     nlp.meta["vectors"]["name"] = nlp.vocab.vectors.name
-    if prune >= 1 and mode != VectorsMode.floret:
+    if prune >= 1 and mode == VectorsMode.default:
         nlp.vocab.prune_vectors(prune)
 
 

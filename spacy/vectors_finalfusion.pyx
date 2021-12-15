@@ -1,35 +1,69 @@
+cimport numpy as np
+from libc.stdint cimport uint32_t
+from cython.operator cimport dereference as deref
+from libcpp.set cimport set as cppset
+from murmurhash.mrmr cimport hash128_x64
+
+from snakefusion import Embeddings
+
+import functools
+import numpy
+from typing import cast
+import warnings
 from enum import Enum
+import srsly
+from thinc.api import Ops, get_current_ops
+from thinc.types import Floats2d
 
-from thinc.api import get_current_ops # Used by spacy-transformers.
-from thinc.api import Ops
+from .strings cimport StringStore
+from .vectors cimport Vectors
 
-class Mode(str, Enum):
-    default = "default"
-    finalfusion = "finalfusion"
-    floret = "floret"
-
-    @classmethod
-    def values(cls):
-        return list(cls.__members__.keys())
+from .strings import get_string_id
+from .errors import Errors, Warnings
+from .vectors import Mode
+from . import util
 
 
-cdef class Vectors:
-    """Store, save and load word vectors.
+def unpickle_vectors(bytes_data):
+    return FinalfusionVectors().from_bytes(bytes_data)
 
-    Vectors data is kept in the vectors.data attribute, which should be an
-    instance of numpy.ndarray (for CPU vectors) or cupy.ndarray
-    (for GPU vectors).
 
-    In the default mode, `vectors.key2row` is a dictionary mapping word hashes
-    to rows in the vectors.data table. Multiple keys can be mapped to the same
-    vector, and not all of the rows in the table need to be assigned - so
-    len(list(vectors.keys())) may be greater or smaller than vectors.shape[0].
+cdef class FinalfusionVectors(Vectors):
+    """Store, save and load finalfusion word vectors.
 
-    In floret mode, the floret settings (minn, maxn, etc.) are used to
-    calculate the vector from the rows corresponding to the key's ngrams.
+    This class supports loading of finalfusion word embeddings.
 
     DOCS: https://spacy.io/api/vectors
     """
+    cdef object embeddings
+    cdef object ops
+
+    def __init__(self, embeddings_path: str, *, mmap: bool=False, name: str=None, strings=None):
+        """Load finalfusion embeddings
+
+        embeddings_path (str): The path to the finalfusion embeddings.
+        mmap (bool): whether the embeddings should be memory-mapped (default: False).
+        name (str): A name to identify the vectors table.
+
+        DOCS: https://spacy.io/api/vectors#init
+        """
+        self.strings = strings
+        if self.strings is None:
+            self.strings = StringStore()
+
+        self.name = name
+
+        self.ops = get_current_ops()
+
+        if embeddings_path == None:
+            return
+
+        self.embeddings = Embeddings(embeddings_path, mmap=mmap)
+
+        for word in self.embeddings.vocab:
+            self.strings.add(word)
+
+        self.mode = Mode.finalfusion
 
     @property
     def shape(self):
@@ -40,7 +74,7 @@ cdef class Vectors:
 
         DOCS: https://spacy.io/api/vectors#shape
         """
-        raise NotImplementedError
+        return self.embeddings.storage.shape
 
     @property
     def size(self):
@@ -50,7 +84,7 @@ cdef class Vectors:
 
         DOCS: https://spacy.io/api/vectors#size
         """
-        raise NotImplementedError
+        return self.embeddings.storage.shape[0] * self.embeddings.storage.shape[1]
 
     @property
     def is_full(self):
@@ -60,7 +94,7 @@ cdef class Vectors:
 
         DOCS: https://spacy.io/api/vectors#is_full
         """
-        raise NotImplementedError
+        return True
 
     @property
     def n_keys(self):
@@ -68,14 +102,13 @@ cdef class Vectors:
         of all keys, not just unique vectors.
 
         RETURNS (int): The number of keys in the table for default vectors.
-        For floret vectors, return -1.
 
         DOCS: https://spacy.io/api/vectors#n_keys
         """
-        raise NotImplementedError
+        return len(self.embeddings.vocab)
 
     def __reduce__(self):
-        raise NotImplementedError
+        return (unpickle_vectors, (self.to_bytes(),))
 
     def __getitem__(self, key):
         """Get a vector by key. If the key is not found, a KeyError is raised.
@@ -85,7 +118,10 @@ cdef class Vectors:
 
         DOCS: https://spacy.io/api/vectors#getitem
         """
-        raise NotImplementedError
+        try:
+            self.embeddings[key]
+        except KeyError:
+            raise KeyError(Errors.E058.format(key=key))
 
     def __setitem__(self, key, vector):
         """Set a vector for the given key.
@@ -95,7 +131,8 @@ cdef class Vectors:
 
         DOCS: https://spacy.io/api/vectors#setitem
         """
-        raise NotImplementedError
+        warnings.warn(Warnings.W115.format(method="FinalfusionVectors.__setitem__"))
+        return
 
     def __iter__(self):
         """Iterate over the keys in the table.
@@ -104,7 +141,7 @@ cdef class Vectors:
 
         DOCS: https://spacy.io/api/vectors#iter
         """
-        raise NotImplementedError
+        yield from self.embeddings.vocab
 
     def __len__(self):
         """Return the number of vectors in the table.
@@ -113,7 +150,7 @@ cdef class Vectors:
 
         DOCS: https://spacy.io/api/vectors#len
         """
-        raise NotImplementedError
+        return self.embeddings.storage.shape[0]
 
     def __contains__(self, key):
         """Check whether a key has been mapped to a vector entry in the table.
@@ -123,28 +160,24 @@ cdef class Vectors:
 
         DOCS: https://spacy.io/api/vectors#contains
         """
-        raise NotImplementedError
+        return self.embeddings.vocab.get(key) is not None
 
     def resize(self, shape, inplace=False):
-        """Resize the underlying vectors array. If inplace=True, the memory
-        is reallocated. This may cause other references to the data to become
-        invalid, so only use inplace=True if you're sure that's what you want.
-
-        If the number of vectors is reduced, keys mapped to rows that have been
-        deleted are removed. These removed items are returned as a list of
-        `(key, row)` tuples.
+        """Resize the underlying vectors array. This operation is not supported
+        on finalfusion embeddings.
 
         shape (tuple): A `(rows, dims)` tuple.
         inplace (bool): Reallocate the memory.
-        RETURNS (list): The removed items as a list of `(key, row)` tuples.
+        RETURNS (list): -1.
 
         DOCS: https://spacy.io/api/vectors#resize
         """
-        raise NotImplementedError
+        warnings.warn(Warnings.W115.format(method="NdArrayVectors.resize"))
+        return -1
 
     def keys(self):
         """RETURNS (iterable): A sequence of keys in the table."""
-        raise NotImplementedError
+        return self.embeddings.vocab
 
     def values(self):
         """Iterate over vectors that have been assigned to at least one key.
@@ -156,7 +189,7 @@ cdef class Vectors:
 
         DOCS: https://spacy.io/api/vectors#values
         """
-        raise NotImplementedError
+        yield from self.embeddings.storage
 
     def items(self):
         """Iterate over `(key, vector)` pairs.
@@ -165,7 +198,7 @@ cdef class Vectors:
 
         DOCS: https://spacy.io/api/vectors#items
         """
-        raise NotImplementedError
+        yield from self.embeddings
 
     def find(self, *, key=None, keys=None, row=None, rows=None):
         """Look up one or more keys by row, or vice versa.
@@ -180,27 +213,36 @@ cdef class Vectors:
             Returns ndarray.
         RETURNS: The requested key, keys, row or rows.
         """
-        raise NotImplementedError
+        raise ValueError(
+            Errors.E858.format(
+                mode=self.mode,
+                alternative="Use Vectors[key] instead.",
+            )
+        )
 
     def get_batch(self, keys):
         """Get the vectors for the provided keys efficiently as a batch.
         keys (Iterable[Union[int, str]]): The keys.
         RETURNS: The requested vectors from the vector table.
         """
-        raise NotImplementedError
+        keys = [self.strings.as_string(key) for key in keys]
+        return self.ops.asarray2f(self.embeddings.embedding_batch(keys)[0])
 
     def add(self, key, *, vector=None, row=None):
         """Add a key to the table. Keys can be mapped to an existing vector
         by setting `row`, or a new vector can be added.
 
+        This method is a noop with finalfusion embeddings.
+
         key (int): The key to add.
         vector (ndarray / None): A vector to add for the key.
         row (int / None): The row number of a vector to map the key to.
-        RETURNS (int): The row the vector was added to.
+        RETURNS (int): -1
 
         DOCS: https://spacy.io/api/vectors#add
         """
-        raise NotImplementedError
+        warnings.warn(Warnings.W115.format(method="FinalfusionVectors.add"))
+        return -1
 
     def most_similar(self, queries, *, batch_size=1024, n=1, sort=True):
         """For each of the given vectors, find the n most similar entries
@@ -218,10 +260,24 @@ cdef class Vectors:
         RETURNS (tuple): The most similar entries as a `(keys, best_rows, scores)`
             tuple.
         """
-        raise NotImplementedError
+
+        # TODO: Similarity queries are supported by finalfusion, but not with a
+        # batch size
+        raise ValueError(Errors.E858.format(
+            mode=self.mode,
+            alternative="",
+        ))
 
     def to_ops(self, ops: Ops):
-        raise NotImplementedError
+        self.ops = ops
+
+    def _get_cfg(self):
+        return {
+            "mode": Mode(self.mode).value,
+        }
+
+    def _set_cfg(self, cfg):
+        self.mode = Mode(cfg.get("mode", Mode.default)).value
 
     def to_disk(self, path, *, exclude=tuple()):
         """Save the current state to a directory.
@@ -231,7 +287,15 @@ cdef class Vectors:
 
         DOCS: https://spacy.io/api/vectors#to_disk
         """
-        raise NotImplementedError
+        def save_vectors(path):
+            self.embeddings.write(path)
+
+        serializers = {
+            "strings": lambda p: self.strings.to_disk(p.with_suffix(".json")),
+            "embeddings": lambda p: save_vectors(p),
+            "vectors.cfg": lambda p: srsly.write_json(p, self._get_cfg()),
+        }
+        return util.to_disk(path, serializers, exclude)
 
     def from_disk(self, path, *, exclude=tuple()):
         """Loads state from a directory. Modifies the object in place and
@@ -242,7 +306,22 @@ cdef class Vectors:
 
         DOCS: https://spacy.io/api/vectors#from_disk
         """
-        raise NotImplementedError
+        def load_embeddings(path):
+            self.embeddings = Embeddings(path)
+
+        def load_settings(path):
+            if path.exists():
+                self._set_cfg(srsly.read_json(path))
+
+        serializers = {
+            "strings": lambda p: self.strings.from_disk(p.with_suffix(".json")),
+            "embeddings": load_embeddings,
+            "vectors.cfg": load_settings,
+        }
+
+        util.from_disk(path, serializers, exclude)
+
+        return self
 
     def to_bytes(self, *, exclude=tuple()):
         """Serialize the current state to a binary string.
@@ -252,7 +331,12 @@ cdef class Vectors:
 
         DOCS: https://spacy.io/api/vectors#to_bytes
         """
-        raise NotImplementedError
+        serializers = {
+            "strings": lambda: self.strings.to_bytes(),
+            "embeddings": lambda: self.embeddings.to_bytes(),
+            "vectors.cfg": lambda: srsly.json_dumps(self._get_cfg()),
+        }
+        return util.to_bytes(serializers, exclude)
 
     def from_bytes(self, data, *, exclude=tuple()):
         """Load state from a binary string.
@@ -263,11 +347,21 @@ cdef class Vectors:
 
         DOCS: https://spacy.io/api/vectors#from_bytes
         """
-        raise NotImplementedError
+        deserializers = {
+            "strings": lambda b: self.strings.from_bytes(b),
+            "embeddings": lambda b: Embeddings.from_bytes(b),
+            "vectors.cfg": lambda b: self._set_cfg(srsly.json_loads(b))
+        }
+        util.from_bytes(data, deserializers, exclude)
+
+        return self
 
     def clear(self):
         """Clear all entries in the vector table.
 
+        Raises an error for FinalfusionEmbeddings, since clearing the embedding
+        table is not supported.
+
         DOCS: https://spacy.io/api/vectors#clear
         """
-        raise NotImplementedError
+        raise ValueError(Errors.E859)

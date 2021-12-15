@@ -15,6 +15,7 @@ from .compat import copy_reg
 from .errors import Errors
 from .attrs import intify_attrs, NORM, IS_STOP
 from .vectors import Vectors, Mode as VectorsMode
+from .vectors_finalfusion import FinalfusionVectors
 from .vectors_ndarray import NdArrayVectors
 from .util import registry
 from .lookups import Lookups
@@ -188,7 +189,7 @@ cdef class Vocab:
         lex = <LexemeC*>mem.alloc(1, sizeof(LexemeC))
         lex.orth = self.strings.add(string)
         lex.length = len(string)
-        if self.vectors is not None:
+        if self.vectors is not None and self.vectors.mode != VectorsMode.finalfusion:
             lex.id = self.vectors.key2row.get(lex.orth, OOV_RANK)
         else:
             lex.id = OOV_RANK
@@ -459,6 +460,9 @@ cdef class Vocab:
         if "vectors" not in exclude:
             if self.vectors is not None:
                 self.vectors.from_disk(path, exclude=["strings"])
+                if self.vectors.mode == VectorsMode.finalfusion:
+                    self.vectors = FinalfusionVectors(None, strings=self.strings)
+                    self.vectors.from_disk(path, exclude=["strings"])
         if "lookups" not in exclude:
             self.lookups.from_disk(path)
         if "lexeme_norm" in self.lookups:

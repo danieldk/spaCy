@@ -1,5 +1,7 @@
 from enum import Enum
 
+from thinc.api import get_current_ops # Used by spacy-transformers.
+from thinc.api import Ops
 
 class Mode(str, Enum):
     default = "default"
@@ -215,6 +217,9 @@ cdef class Vectors:
         RETURNS (tuple): The most similar entries as a `(keys, best_rows, scores)`
             tuple.
         """
+        raise NotImplementedError
+
+    def to_ops(self, ops: Ops):
         raise NotImplementedError
 
     def to_disk(self, path, *, exclude=tuple()):

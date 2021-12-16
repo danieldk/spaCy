@@ -284,7 +284,7 @@ cdef class Vocab:
 
     @property
     def vectors_length(self):
-        return self.vectors.data.shape[1]
+        return self.vectors.shape[1]
 
     def reset_vectors(self, *, width=None, shape=None):
         """Drop the current vector table. Because all vectors must be the same

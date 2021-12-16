@@ -501,6 +501,9 @@ cdef class NdArrayVectors(Vectors):
                     for i in range(len(queries)) ], dtype="uint64")
         return (keys, best_rows, scores)
 
+    def to_ops(self, ops: Ops):
+        self.data = ops.asarray(self.data)
+
     def _get_cfg(self):
         if self.mode == Mode.default:
             return {

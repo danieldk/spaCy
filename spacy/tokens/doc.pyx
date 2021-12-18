@@ -637,7 +637,7 @@ cdef class Doc:
                 return self.user_hooks["vector"](self)
             if self._vector is not None:
                 return self._vector
-            xp = get_array_module(self.vocab.vectors.data)
+            xp = self.vocab.vectors.ops.xp
             if not len(self):
                 self._vector = xp.zeros((self.vocab.vectors_length,), dtype="f")
                 return self._vector

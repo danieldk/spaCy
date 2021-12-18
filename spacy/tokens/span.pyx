@@ -518,7 +518,7 @@ cdef class Span:
             return self.doc.user_span_hooks["vector"](self)
         if self._vector is None:
             if not len(self):
-                xp = get_array_module(self.vocab.vectors.data)
+                xp = self.vocab.vectors.ops.xp
                 self._vector = xp.zeros((self.vocab.vectors_length,), dtype="f")
             else:
                 self._vector = sum(t.vector for t in self) / len(self)

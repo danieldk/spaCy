@@ -511,6 +511,10 @@ cdef class Vectors:
                     for i in range(len(queries)) ], dtype="uint64")
         return (keys, best_rows, scores)
 
+    @property
+    def ops(self) -> Ops:
+        return get_array_ops(self.data)
+
     def to_ops(self, ops: Ops):
         self.data = ops.asarray(self.data)
 

@@ -371,6 +371,18 @@ Get the vectors for the provided keys efficiently as a batch.
 | ------ | --------------------------------------- |
 | `keys` | The keys. ~~Iterable[Union[int, str]]~~ |
 
+## Vectors.ops {#ops tag="property"}
+
+Get the ops used for the embedding matrix.
+
+> #### Example
+>
+> ```python
+> from thinc.api import NumpyOps
+> nlp = spacy.load("en_core_web_lg")
+> assert isinstance(nlp.vocab.vectors.ops, NumpyOps)
+> ```
+
 ## Vectors.to_ops {#to_ops tag="method"}
 
 Change the embedding matrix to use different Thinc ops.

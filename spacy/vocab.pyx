@@ -2,7 +2,7 @@
 from libc.string cimport memcpy
 
 import srsly
-from thinc.api import get_array_module, get_current_ops
+from thinc.api import get_current_ops
 import functools
 
 from .lexeme cimport EMPTY_LEXEME, OOV_RANK
@@ -327,7 +327,7 @@ cdef class Vocab:
         if self.vectors.mode != VectorsMode.default:
             raise ValueError(Errors.E866)
         ops = get_current_ops()
-        xp = get_array_module(self.vectors.data)
+        xp = self.vectors.ops.xp
         # Make sure all vectors are in the vocab
         for orth in self.vectors:
             self[orth]
@@ -368,7 +368,7 @@ cdef class Vocab:
             orth = self.strings.add(orth)
         if self.has_vector(orth):
             return self.vectors[orth]
-        xp = get_array_module(self.vectors.data)
+        xp = self.vectors.ops.xp
         vectors = xp.zeros((self.vectors_length,), dtype="f")
         return vectors
 

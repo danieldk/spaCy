@@ -199,9 +199,8 @@ class Tagger(TrainablePipe):
             return losses
         set_dropout_rate(self.model, drop)
         tag_scores, bp_tag_scores = self.model.begin_update([eg.predicted for eg in examples])
-        for sc in tag_scores:
-            if self.model.ops.xp.isnan(sc.sum()):
-                raise ValueError(Errors.E940)
+        if self.model.ops.xp.isnan(tag_scores.data.sum()):
+            raise ValueError(Errors.E940)
         loss, d_tag_scores = self.get_loss(examples, tag_scores)
         bp_tag_scores(d_tag_scores)
         if sgd not in (None, False):

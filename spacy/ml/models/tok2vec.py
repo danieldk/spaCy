@@ -164,6 +164,27 @@ def build_Tok2Vec_model(
     return tok2vec
 
 
+@registry.architectures("spacy.Tok2Vec.v3")
+def build_Tok2Vec_model(
+    embed: Model[List[Doc], Ragged],
+    encode: Model[Ragged, Ragged],
+) -> Model[List[Doc], Ragged]:
+    """Construct a tok2vec model out of embedding and encoding subnetworks.
+    See https://explosion.ai/blog/deep-learning-formula-nlp
+
+    embed (Model[List[Doc], Ragged]): Embed tokens into context-independent
+        word vector representations.
+    encode (Model[Ragged, Ragged]): Encode context into the
+        embeddings, using an architecture such as a CNN, BiLSTM or transformer.
+    """
+    tok2vec = chain(embed, encode)
+    if encode.has_dim("nO"):
+        tok2vec.set_dim("nO", encode.get_dim("nO"))
+    tok2vec.set_ref("embed", embed)
+    tok2vec.set_ref("encode", encode)
+    return tok2vec
+
+
 @registry.architectures("spacy.MultiHashEmbed.v2")
 def MultiHashEmbed(
     width: int,
@@ -455,10 +476,7 @@ def MaxoutWindowEncoderRagged(
             )
         ),
     )
-    model = chain(
-        clone(residual(cnn), depth),
-        cast(Model[Ragged, List[Floats2d]], ragged2list()),
-    )  # type: ignore[arg-type]
+    model = clone(residual(cnn), depth)  # type: ignore[arg-type]
     model.set_dim("nO", width)
     return model  # type: ignore[arg-type]
 

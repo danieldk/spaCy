@@ -1,15 +1,19 @@
-from typing import Optional, List
+from typing import Optional, List, Union
 from thinc.api import zero_init, with_array, Softmax, chain, Model
-from thinc.types import Floats2d
+from thinc.types import Floats2d, Ragged
 
 from ...util import registry
 from ...tokens import Doc
 
 
+InT = List[Doc]
+OutT = Union[List[Floats2d], Ragged]
+
+
 @registry.architectures("spacy.Tagger.v1")
 def build_tagger_model(
-    tok2vec: Model[List[Doc], List[Floats2d]], nO: Optional[int] = None
-) -> Model[List[Doc], List[Floats2d]]:
+    tok2vec: Model[InT, OutT], nO: Optional[int] = None
+) -> Model[InT, OutT]:
     """Build a tagger model, using a provided token-to-vector component. The tagger
     model simply adds a linear layer with softmax activation to predict scores
     given the token vectors.
@@ -26,3 +30,4 @@ def build_tagger_model(
     model.set_ref("softmax", output_layer)
     model.set_ref("output_layer", output_layer)
     return model
+

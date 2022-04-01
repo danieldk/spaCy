@@ -3,6 +3,7 @@ from thinc.api import Ops, Model, normal_init, chain, list2array, Linear
 from thinc.api import uniform_init, glorot_uniform_init, zero_init
 from thinc.types import Floats1d, Floats2d, Floats3d, Ints2d, Floats4d
 import numpy
+from ..pipeline._parser_internals import _beam_utils
 from ..tokens.doc import Doc
 from ..util import registry
 
@@ -139,6 +140,9 @@ def forward(model, docs_moves: Tuple[List[Doc], TransitionSystem], is_train: boo
     nO = model.get_dim("nO")
     nI = model.get_dim("nI")
 
+    beam_width = model.attrs.get("beam_width", 1)
+    beam_density = model.attrs.get("beam_density", 0.0)
+
     ops = model.ops
     docs, moves = docs_moves
     states = moves.init_batch(docs)
@@ -149,20 +153,23 @@ def forward(model, docs_moves: Tuple[List[Doc], TransitionSystem], is_train: boo
     all_which = []
     all_statevecs = []
     all_scores = []
-    next_states = [s for s in states if not s.is_final()]
+    if beam_width == 1:
+        batch = GreedyBatch(moves, states, None)
+    else:
+        batch = _beam_utils.BeamBatch(moves, states, None, beam_width, density=beam_density)
     seen_mask = _get_seen_mask(model)
-    ids = numpy.zeros((len(states), nF), dtype="i")
     arange = model.ops.xp.arange(nF)
-    while next_states:
-        ids = ids[: len(next_states)]
-        for i, state in enumerate(next_states):
+    while not batch.is_done:
+        ids = numpy.zeros((len(batch.get_unfinished_states()), nF), dtype="i")
+        #ids = ids[: len(batch.get_states())]
+        for i, state in enumerate(batch.get_unfinished_states()):
             state.set_context_tokens(ids, i, nF)
         # Sum the state features, add the bias and apply the activation (maxout)
         # to create the state vectors.
         preacts2f = feats[ids, arange].sum(axis=1)  # type: ignore
         preacts2f += lower_b
         preacts = model.ops.reshape3f(preacts2f, preacts2f.shape[0], nH, nP)
-        assert preacts.shape[0] == len(next_states), preacts.shape
+        assert preacts.shape[0] == len(batch.get_unfinished_states()), preacts.shape
         statevecs, which = ops.maxout(preacts)
         # Multiply the state-vector by the scores weights and add the bias,
         # to get the logits.
@@ -171,11 +178,11 @@ def forward(model, docs_moves: Tuple[List[Doc], TransitionSystem], is_train: boo
         scores[:, seen_mask] = model.ops.xp.nanmin(scores)
         # Transition the states, filtering out any that are finished.
         cpu_scores = model.ops.to_numpy(scores)
-        next_states = moves.transition_states(next_states, cpu_scores)
+        batch.advance(cpu_scores)
         all_scores.append(scores)
         if is_train:
             # Remember intermediate results for the backprop.
-            all_ids.append(ids.copy())
+            all_ids.append(ids)
             all_statevecs.append(statevecs)
             all_which.append(which)
 
@@ -211,7 +218,7 @@ def forward(model, docs_moves: Tuple[List[Doc], TransitionSystem], is_train: boo
         model.inc_grad("lower_pad", d_tokvecs[-1])
         return (backprop_tok2vec(d_tokvecs[:-1]), None)
 
-    return (states, all_scores), backprop_parser
+    return (list(batch), all_scores), backprop_parser
 
 
 def _forward_reference(
@@ -436,3 +443,29 @@ def _lsuv_init(model: Model):
         else:
             break
     return model
+
+class GreedyBatch:
+    def __init__(self, moves: TransitionSystem, states, golds):
+        self._moves = moves
+        self._states = states
+        self._next_states = [s for s in states if not s.is_final()]
+        #self._next_states = self._states
+
+    def advance(self, scores):
+        self._next_states = self._moves.transition_states(self._next_states, scores)
+
+    def get_states(self):
+        return self._states
+
+    @property
+    def is_done(self):
+        return all(s.is_final() for s in self._states)
+
+    def get_unfinished_states(self):
+        return [st for st in self._states if not st.is_final()]
+
+    def __getitem__(self, i):
+        return self._states[i]
+
+    def __len__(self):
+        return len(self._states)

@@ -1,5 +1,6 @@
 # cython: infer_types=True, cdivision=True, boundscheck=False
 from typing import List, Tuple, Any, Optional, cast
+from cpython.ref cimport PyObject
 from libc.string cimport memset, memcpy
 from libc.stdlib cimport calloc, free, realloc
 from libcpp.vector cimport vector
@@ -481,31 +482,38 @@ cpdef forward_cpu(model: Model, TransitionSystem moves, states: List[StateClass]
     cdef int n_tokens = feats.shape[0] - 1
     sizes = get_c_sizes(model, c_states.size(), n_tokens)
     cdef CBlas cblas = model.ops.cblas()
-    with nogil:
-        _parseC(cblas, moves, &c_states[0], weights, sizes)
+    _parseC(cblas, moves, &c_states[0], weights, sizes)
 
     # TODO: scores
     return states, []
 
 cdef void _parseC(CBlas cblas, TransitionSystem moves, StateC** states,
-                  WeightsC weights, SizesC sizes) nogil:
+                  WeightsC weights, SizesC sizes):
     cdef int i, j
     cdef vector[StateC *] unfinished
     cdef ActivationsC activations = alloc_activations(sizes)
+    scores = []
     while sizes.states >= 1:
-        predict_states(cblas, &activations, states, &weights, sizes)
-        # Validate actions, argmax, take action.
-        c_transition_batch(moves, states, activations.scores, sizes.classes,
-           sizes.states)
-        for i in range(sizes.states):
-            if not states[i].is_final():
-                unfinished.push_back(states[i])
-        for i in range(unfinished.size()):
-            states[i] = unfinished[i]
+        with nogil:
+            predict_states(cblas, &activations, states, &weights, sizes)
+            # Validate actions, argmax, take action.
+            c_transition_batch(moves, states, activations.scores, sizes.classes,
+            sizes.states)
+            for i in range(sizes.states):
+                if not states[i].is_final():
+                    unfinished.push_back(states[i])
+            for i in range(unfinished.size()):
+                states[i] = unfinished[i]
         sizes.states = unfinished.size()
+        scores.append(activations_to_numpy(sizes.states, sizes.classes, activations.scores))
         unfinished.clear()
     free_activations(&activations)
 
+
+cdef object activations_to_numpy(int states, int classes, const float* scores):
+    cdef np.ndarray arr = numpy.empty((states, classes), dtype="f")
+    memcpy(arr.data, scores, states * classes * sizeof(float))
+    return arr
 
 cdef WeightsC get_c_weights(model, const float* feats, np.ndarray[np.npy_bool, ndim=1] seen_mask) except *:
     cdef np.ndarray lower_bias = model.get_param("lower_b")

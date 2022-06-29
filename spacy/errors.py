@@ -209,6 +209,7 @@ class Warnings(metaclass=ErrorsWithCodes):
             "Only the last span group will be loaded under "
             "Doc.spans['{group_name}']. Skipping span group with values: "
             "{group_values}")
+    W121 = ("Cannot install interval signposts because the 'os_signpost' package is not installed")
 
 
 class Errors(metaclass=ErrorsWithCodes):

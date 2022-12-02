@@ -395,6 +395,22 @@ class ConfigSchemaInit(BaseModel):
         arbitrary_types_allowed = True
 
 
+class ConfigSchemaDistillEmpty(BaseModel):
+    class Config:
+        extra = "forbid"
+
+
+class ConfigSchemaDistill(BaseModel):
+    # fmt: off
+    distill_corpus: StrictStr = Field(..., title="Path in the config to the distillation data")
+    pipe_map: Dict[str, str] = Field(..., title="Mapping from teacher to student pipe")
+    # fmt: on
+
+    class Config:
+        extra = "forbid"
+        arbitrary_types_allowed = True
+
+
 class ConfigSchema(BaseModel):
     training: ConfigSchemaTraining
     nlp: ConfigSchemaNlp
@@ -402,6 +418,7 @@ class ConfigSchema(BaseModel):
     components: Dict[str, Dict[str, Any]]
     corpora: Dict[str, Reader]
     initialize: ConfigSchemaInit
+    distill: Union[ConfigSchemaDistill, ConfigSchemaDistillEmpty] = {}
 
     class Config:
         extra = "allow"
@@ -413,6 +430,7 @@ CONFIG_SCHEMAS = {
     "training": ConfigSchemaTraining,
     "pretraining": ConfigSchemaPretrain,
     "initialize": ConfigSchemaInit,
+    "distill": ConfigSchemaDistill,
 }
 
 

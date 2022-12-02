@@ -10,6 +10,7 @@ import random
 
 import srsly
 from thinc.api import get_ops, set_dropout_rate, CupyOps, NumpyOps
+from thinc.api import SequenceCategoricalCrossentropy, chain, softmax_activation, use_ops
 from thinc.extra.search cimport Beam
 import numpy.random
 import numpy
@@ -201,6 +202,72 @@ cdef class Parser(TrainablePipe):
     def add_multitask_objective(self, target):
         # Defined in subclasses, to avoid circular import
         raise NotImplementedError
+
+    def distill(self,
+               teacher_pipe,
+               teacher_examples,
+               student_examples,
+               *,
+               drop,
+               sgd,
+               losses):
+        if losses is None:
+            losses = {}
+        if not hasattr(self, "model") or self.model in (None, True, False):
+            return losses
+        losses.setdefault(self.name, 0.0)
+
+        validate_examples(teacher_examples, "TrainablePipe.distill")
+        validate_examples(student_examples, "TrainablePipe.distill")
+
+        if not any(len(eg.predicted) if eg.predicted else 0 for eg in teacher_examples):
+            return losses
+        if not any(len(eg.predicted) if eg.predicted else 0 for eg in student_examples):
+            return losses
+
+        set_dropout_rate(self.model, drop)
+        docs = [eg.predicted for eg in teacher_examples]
+
+        teacher_step_model = teacher_pipe.model.predict(docs)
+        student_step_model, backprop_tok2vec = self.model.begin_update(docs)
+
+        with use_ops("numpy"):
+            teacher_model = chain(teacher_step_model, softmax_activation())
+            student_model = chain(student_step_model, softmax_activation())
+
+        states = teacher_pipe.moves.init_batch(docs)
+        loss = 0.
+        while states:
+            teacher_scores = teacher_model.predict(states)
+            student_scores, backprop = student_model.begin_update(states)
+            state_loss, d_scores = self.get_distill_loss(teacher_scores, student_scores)
+            backprop(d_scores)
+            loss += state_loss
+            self.transition_states(states, student_scores)
+            states = [state for state in states if not state.is_final()]
+
+        backprop_tok2vec(docs)
+
+        if sgd is not None:
+            self.finish_update(sgd)
+
+        losses[self.name] += loss
+
+        del backprop
+        del backprop_tok2vec
+        teacher_step_model.clear_memory()
+        student_step_model.clear_memory()
+        del teacher_model
+        del student_model
+
+        return losses
+
+    def get_distill_loss(self, teacher_scores, student_scores):
+        loss_func = SequenceCategoricalCrossentropy(normalize=False)
+        d_scores, loss = loss_func(student_scores, teacher_scores)
+        if self.model.ops.xp.isnan(loss):
+            raise ValueError(Errors.E910.format(name=self.name))
+        return float(loss), d_scores
 
     def init_multitask_objectives(self, get_examples, pipeline, **cfg):
         """Setup models for secondary objectives, to benefit from multi-task

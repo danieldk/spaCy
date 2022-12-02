@@ -1018,6 +1018,95 @@ class Language:
                 raise ValueError(Errors.E005.format(name=name, returned_type=type(doc)))
         return doc
 
+    def distill(
+        self,
+        teacher: "Language",
+        examples: Iterable[Example],
+        _: Optional[Any] = None,
+        *,
+        drop: float = 0.0,
+        sgd: Optional[Optimizer] = None,
+        losses: Optional[Dict[str, float]] = None,
+        component_cfg: Optional[Dict[str, Dict[str, Any]]] = None,
+        exclude: Iterable[str] = SimpleFrozenList(),
+        annotates: Iterable[str] = SimpleFrozenList(),
+        pipe_map: Dict[str, str],
+    ):
+        """Update the models in the pipeline.
+        examples (Iterable[Example]): A batch of examples
+        _: Should not be set - serves to catch backwards-incompatible scripts.
+        drop (float): The dropout rate.
+        sgd (Optimizer): An optimizer.
+        losses (Dict[str, float]): Dictionary to update with the loss, keyed by
+            component.
+        component_cfg (Dict[str, Dict]): Config parameters for specific pipeline
+            components, keyed by component name.
+        exclude (Iterable[str]): Names of components that shouldn't be updated.
+        annotates (Iterable[str]): Names of components that should set
+            annotations on the predicted examples after updating.
+        RETURNS (Dict[str, float]): The updated losses dictionary
+        DOCS: https://spacy.io/api/language#update
+        """
+        if _ is not None:
+            raise ValueError(Errors.E989)
+        if losses is None:
+            losses = {}
+        if len(examples) == 0:
+            return losses
+        validate_examples(examples, "Language.distill")
+        student_examples = _copy_examples(examples)
+        teacher_examples = _copy_examples(examples)
+        if sgd is None:
+            if self._optimizer is None:
+                self._optimizer = self.create_optimizer()
+            sgd = self._optimizer
+        if component_cfg is None:
+            component_cfg = {}
+        pipe_kwargs = {}
+        for name, student_proc in self.pipeline:
+            component_cfg.setdefault(name, {})
+            pipe_kwargs[name] = deepcopy(component_cfg[name])
+            component_cfg[name].setdefault("drop", drop)
+            pipe_kwargs[name].setdefault("batch_size", self.batch_size)
+        teacher_pipes = dict(teacher.pipeline)
+        for name, student_proc in self.pipeline:
+            if name not in exclude and hasattr(student_proc, "distill"):
+                # XXX: validate earlier that all pipes are mappable.
+                teacher_pipe_name = pipe_map[name] if name in pipe_map else name
+                teacher_proc = teacher_pipes[teacher_pipe_name]
+                student_proc.distill(
+                    teacher_proc,
+                    teacher_examples,
+                    student_examples,
+                    sgd=None,
+                    losses=losses,
+                    **component_cfg[name],
+                )
+            if sgd not in (None, False):
+                if (
+                    name not in exclude
+                    and hasattr(student_proc, "is_trainable")
+                    and student_proc.is_trainable
+                    and student_proc.model not in (True, False, None)
+                ):
+                    student_proc.finish_update(sgd)
+            if name in annotates:
+                for proc, examples in zip(
+                    [teacher_proc, student_proc], [teacher_examples, student_examples]
+                ):
+                    for doc, eg in zip(
+                        _pipe(
+                            (eg.predicted for eg in examples),
+                            proc=proc,
+                            name=name,
+                            default_error_handler=self.default_error_handler,
+                            kwargs=pipe_kwargs[name],
+                        ),
+                        examples,
+                    ):
+                        eg.predicted = doc
+        return losses
+
     def disable_pipes(self, *names) -> "DisabledPipes":
         """Disable one or more pipeline components. If used as a context
         manager, the pipeline will be restored to the initial state at the end
@@ -1252,12 +1341,16 @@ class Language:
         self,
         get_examples: Optional[Callable[[], Iterable[Example]]] = None,
         *,
+        labels: Dict[str, Any] = None,
         sgd: Optional[Optimizer] = None,
     ) -> Optimizer:
         """Initialize the pipe for training, using data examples if available.
 
         get_examples (Callable[[], Iterable[Example]]): Optional function that
             returns gold-standard Example objects.
+        labels (Dict[str, Any]): labels to pass to pipe initialization, using
+            the names of the pipes as keys. Overrides labels that are in the
+            model configuration.
         sgd (Optional[Optimizer]): An optimizer to use for updates. If not
             provided, will be created using the .create_optimizer() method.
         RETURNS (thinc.api.Optimizer): The optimizer.
@@ -1302,6 +1395,8 @@ class Language:
         for name, proc in self.pipeline:
             if isinstance(proc, ty.InitializableComponent):
                 p_settings = I["components"].get(name, {})
+                if labels is not None and name in labels:
+                    p_settings["labels"] = labels[name]
                 p_settings = validate_init_settings(
                     proc.initialize, p_settings, section="components", name=name
                 )

@@ -116,6 +116,13 @@ class EditTreeLemmatizer(TrainablePipe):
         self.cfg: Dict[str, Any] = {"labels": []}
         self.scorer = scorer
 
+    def get_distill_loss(self, teacher_scores, student_scores):
+        loss_func = SequenceCategoricalCrossentropy(normalize=False)
+        d_scores, loss = loss_func(student_scores, teacher_scores)
+        if self.model.ops.xp.isnan(loss):
+            raise ValueError(Errors.E910.format(name=self.name))
+        return float(loss), d_scores
+
     def get_loss(
         self, examples: Iterable[Example], scores: List[Floats2d]
     ) -> Tuple[float, List[Floats2d]]:

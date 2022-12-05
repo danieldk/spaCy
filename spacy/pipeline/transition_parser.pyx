@@ -234,9 +234,18 @@ cdef class Parser(TrainablePipe):
         with use_ops("numpy"):
             teacher_model = chain(teacher_step_model, softmax_activation())
             student_model = chain(student_step_model, softmax_activation())
+        
+        max_moves = self.cfg["update_with_oracle_cut_size"]
+        if max_moves >= 1:
+            # Chop sequences into lengths of this many words, to make the
+            # batch uniform length.
+            max_moves = int(random.uniform(max_moves // 2, max_moves * 2))
+            states = self._init_batch(teacher_step_model, docs, max_moves)
+        else:
+            states = self.moves.init_batch(docs)
 
-        states = teacher_pipe.moves.init_batch(docs)
         loss = 0.
+        n_moves = 0
         while states:
             teacher_scores = teacher_model.predict(states)
             student_scores, backprop = student_model.begin_update(states)
@@ -245,6 +254,10 @@ cdef class Parser(TrainablePipe):
             loss += state_loss
             self.transition_states(states, student_scores)
             states = [state for state in states if not state.is_final()]
+
+            if max_moves >= 1 and n_moves >= max_moves:
+                break
+            n_moves += 1
 
         backprop_tok2vec(docs)
 
@@ -695,6 +708,40 @@ cdef class Parser(TrainablePipe):
                 except AttributeError:
                     raise ValueError(Errors.E149) from None
         return self
+
+    def _init_batch(self, teacher_step_model, docs, max_length):
+        """Make a square batch, of length equal to the shortest transition
+        sequence or a cap. A long
+        doc will get multiple states. Let's say we have a doc of length 2*N,
+        where N is the shortest doc. We'll make two states, one representing
+        long_doc[:N], and another representing long_doc[N:]. In contrast to
+        _init_gold_batch, this version uses a teacher model to generate the
+        cut sequences."""
+        cdef:
+            StateClass start_state
+            StateClass state
+            Transition action
+        all_states = self.moves.init_batch(docs)
+        states = []
+        to_cut = []
+        for state, doc in zip(all_states, docs):
+            if not state.is_final():
+                if len(doc) < max_length:
+                    states.append(state)
+                else:
+                    to_cut.append(state)
+        while to_cut:
+            states.extend(state.copy() for state in to_cut)
+            # Move states forward max_length actions.
+            length = 0
+            while to_cut and length < max_length:
+                teacher_scores = teacher_step_model.predict(to_cut)
+                self.transition_states(to_cut, teacher_scores)
+                # States that are completed do not need further cutting.
+                to_cut = [state for state in to_cut if not state.is_final()]
+                length += 1
+        return states
+
 
     def _init_gold_batch(self, examples, max_length):
         """Make a square batch, of length equal to the shortest transition

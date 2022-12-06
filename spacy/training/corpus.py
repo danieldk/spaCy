@@ -58,6 +58,23 @@ def read_labels(path: Path, *, require: bool = False):
     return srsly.read_json(path)
 
 
+@util.registry.readers("spacy.PlainTextCorpus.v1")
+def create_plain_text_reader(
+    path: Optional[Path],
+) -> Callable[["Language"], Iterable[Doc]]:
+    if path is None:
+        raise ValueError(Errors.E913)
+    util.logger.debug(f"Loading plain text corpus from path: {path}")
+
+    def reader(nlp: "Language") -> Iterable[Doc]:
+        with open(path, encoding="utf-8") as f:
+            for text in f:
+                if len(text.strip()):
+                    yield nlp.make_doc(text)
+
+    return reader
+
+
 def walk_corpus(path: Union[str, Path], file_type) -> List[Path]:
     path = util.ensure_path(path)
     if not path.is_dir() and path.parts[-1].endswith(file_type):

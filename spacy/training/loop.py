@@ -11,6 +11,7 @@ import shutil
 from .example import Example
 from ..schemas import ConfigSchemaDistill, ConfigSchemaTraining
 from ..errors import Errors
+from ..tokens.doc import Doc
 from ..util import resolve_dot_names, registry, logger
 
 if TYPE_CHECKING:
@@ -85,7 +86,7 @@ def distill(
         teacher,
         student,
         optimizer,
-        create_train_batches(student, distill_corpus, batcher, T["max_epochs"]),
+        create_distill_batches(student, distill_corpus, batcher, T["max_epochs"]),
         create_evaluation_callback(student, dev_corpus, score_weights),
         dropout=T["dropout"],
         accumulate_gradient=T["accumulate_gradient"],
@@ -512,7 +513,10 @@ def train_while_improving(
 
 def subdivide_batch(batch, accumulate_gradient):
     batch = list(batch)
-    batch.sort(key=lambda eg: len(eg.predicted))
+    if isinstance(batch, Example):
+        batch.sort(key=lambda eg: len(eg.predicted))
+    elif isinstance(batch, Doc):
+        batch.sort(key=lambda doc: len(doc))
     sub_len = len(batch) // accumulate_gradient
     start = 0
     for i in range(accumulate_gradient):
@@ -555,6 +559,20 @@ def create_evaluation_callback(
         return weighted_score, scores
 
     return evaluate
+
+
+def create_distill_batches(
+    nlp: "Language",
+    corpus: Callable[["Language"], Iterable[Doc]],
+    batcher: Callable[[Iterable[Example]], Iterable[Example]],
+    max_epochs: int,
+):
+    epoch = 0
+    while max_epochs < 1 or epoch != max_epochs:
+        examples = corpus(nlp)
+        for batch in batcher(examples):
+            yield epoch, batch
+        epoch += 1
 
 
 def create_train_batches(

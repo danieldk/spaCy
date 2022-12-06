@@ -205,8 +205,8 @@ cdef class Parser(TrainablePipe):
 
     def distill(self,
                teacher_pipe,
-               teacher_examples,
-               student_examples,
+               teacher_docs,
+               student_docs,
                *,
                drop,
                sgd,
@@ -217,19 +217,15 @@ cdef class Parser(TrainablePipe):
             return losses
         losses.setdefault(self.name, 0.0)
 
-        validate_examples(teacher_examples, "TrainablePipe.distill")
-        validate_examples(student_examples, "TrainablePipe.distill")
-
-        if not any(len(eg.predicted) if eg.predicted else 0 for eg in teacher_examples):
+        if not any(len(doc) for doc in teacher_docs):
             return losses
-        if not any(len(eg.predicted) if eg.predicted else 0 for eg in student_examples):
+        if not any(len(doc) for doc in student_docs):
             return losses
 
         set_dropout_rate(self.model, drop)
-        docs = [eg.predicted for eg in teacher_examples]
 
-        teacher_step_model = teacher_pipe.model.predict(docs)
-        student_step_model, backprop_tok2vec = self.model.begin_update(docs)
+        teacher_step_model = teacher_pipe.model.predict(teacher_docs)
+        student_step_model, backprop_tok2vec = self.model.begin_update(student_docs)
 
         with use_ops("numpy"):
             teacher_model = chain(teacher_step_model, softmax_activation())
@@ -240,9 +236,9 @@ cdef class Parser(TrainablePipe):
             # Chop sequences into lengths of this many words, to make the
             # batch uniform length.
             max_moves = int(random.uniform(max_moves // 2, max_moves * 2))
-            states = self._init_batch(teacher_step_model, docs, max_moves)
+            states = self._init_batch(teacher_step_model, student_docs, max_moves)
         else:
-            states = self.moves.init_batch(docs)
+            states = self.moves.init_batch(student_docs)
 
         loss = 0.
         n_moves = 0
@@ -259,7 +255,7 @@ cdef class Parser(TrainablePipe):
                 break
             n_moves += 1
 
-        backprop_tok2vec(docs)
+        backprop_tok2vec(student_docs)
 
         if sgd is not None:
             self.finish_update(sgd)

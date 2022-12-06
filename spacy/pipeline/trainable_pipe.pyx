@@ -58,8 +58,8 @@ cdef class TrainablePipe(Pipe):
 
     def distill(self,
                teacher_pipe: "TrainablePipe",
-               teacher_examples: Iterable["Example"],
-               student_examples: Iterable["Example"],
+               teacher_docs: Iterable["Doc"],
+               student_docs: Iterable["Doc"],
                *,
                drop: float=0.0,
                sgd: Optimizer=None,
@@ -69,18 +69,16 @@ cdef class TrainablePipe(Pipe):
         if not hasattr(self, "model") or self.model in (None, True, False):
             return losses
         losses.setdefault(self.name, 0.0)
-        validate_examples(teacher_examples, "TrainablePipe.distill")
-        validate_examples(student_examples, "TrainablePipe.distill")
-        if not any(len(eg.predicted) if eg.predicted else 0 for eg in teacher_examples):
+        if not any(len(doc) for doc in teacher_docs):
             return losses
-        if not any(len(eg.predicted) if eg.predicted else 0 for eg in student_examples):
+        if not any(len(doc) for doc in student_docs):
             return losses
         set_dropout_rate(self.model, drop)
         for node in teacher_pipe.model.walk():
             if node.name == "softmax":
                 node.attrs["softmax_normalize"] = True
-        teacher_scores = teacher_pipe.model.predict([eg.predicted for eg in teacher_examples])
-        student_scores, bp_student_scores = self.model.begin_update([eg.predicted for eg in student_examples])
+        teacher_scores = teacher_pipe.model.predict(teacher_docs)
+        student_scores, bp_student_scores = self.model.begin_update(student_docs)
         loss, d_scores = self.get_distill_loss(teacher_scores, student_scores)
         bp_student_scores(d_scores)
         if sgd not in (None, False):

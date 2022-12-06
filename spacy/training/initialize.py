@@ -162,6 +162,11 @@ def init_nlp_distill(
             labels[name] = teacher_pipe.label_data
 
     with nlp.select_pipes(disable=[*frozen_components, *resume_components]):
+        # TODO: not sure if we want the dev corpus here. The issue it that
+        # the distillation corpus does not have annotations, so it's not
+        # useable for annotation. I guess we could use the teacher to annotate
+        # docs and then pass those to the student for initialization? This
+        # is still something that I need to try.
         if T["max_epochs"] == -1:
             sample_size = 100
             logger.debug(
@@ -169,11 +174,9 @@ def init_nlp_distill(
                 f"examples for initialization. If necessary, provide all labels "
                 f"in [initialize]. More info: https://spacy.io/api/cli#init_labels"
             )
-            nlp.initialize(
-                lambda: islice(distill_corpus(nlp), sample_size), sgd=optimizer
-            )
+            nlp.initialize(lambda: islice(dev_corpus(nlp), sample_size), sgd=optimizer)
         else:
-            nlp.initialize(lambda: distill_corpus(nlp), sgd=optimizer, labels=labels)
+            nlp.initialize(lambda: dev_corpus(nlp), sgd=optimizer, labels=labels)
         logger.info(f"Initialized pipeline components: {nlp.pipe_names}")
     # Detect components with listeners that are not frozen consistently
     for name, proc in nlp.pipeline:

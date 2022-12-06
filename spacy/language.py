@@ -1021,7 +1021,7 @@ class Language:
     def distill(
         self,
         teacher: "Language",
-        examples: Iterable[Example],
+        docs: Iterable[Doc],
         _: Optional[Any] = None,
         *,
         drop: float = 0.0,
@@ -1051,11 +1051,10 @@ class Language:
             raise ValueError(Errors.E989)
         if losses is None:
             losses = {}
-        if len(examples) == 0:
+        if len(docs) == 0:
             return losses
-        validate_examples(examples, "Language.distill")
-        student_examples = _copy_examples(examples)
-        teacher_examples = _copy_examples(examples)
+        student_docs = docs
+        teacher_docs = [doc.copy() for doc in docs]
         if sgd is None:
             if self._optimizer is None:
                 self._optimizer = self.create_optimizer()
@@ -1071,13 +1070,12 @@ class Language:
         teacher_pipes = dict(teacher.pipeline)
         for name, student_proc in self.pipeline:
             if name not in exclude and hasattr(student_proc, "distill"):
-                # XXX: validate earlier that all pipes are mappable.
                 teacher_pipe_name = pipe_map[name] if name in pipe_map else name
                 teacher_proc = teacher_pipes[teacher_pipe_name]
                 student_proc.distill(
                     teacher_proc,
-                    teacher_examples,
-                    student_examples,
+                    teacher_docs,
+                    student_docs,
                     sgd=None,
                     losses=losses,
                     **component_cfg[name],
@@ -1091,18 +1089,18 @@ class Language:
                 ):
                     student_proc.finish_update(sgd)
             if name in annotates:
-                for proc, examples in zip(
-                    [teacher_proc, student_proc], [teacher_examples, student_examples]
+                for proc, docs in zip(
+                    [teacher_proc, student_proc], [teacher_docs, student_docs]
                 ):
                     for doc, eg in zip(
                         _pipe(
-                            (eg.predicted for eg in examples),
+                            (eg.predicted for eg in docs),
                             proc=proc,
                             name=name,
                             default_error_handler=self.default_error_handler,
                             kwargs=pipe_kwargs[name],
                         ),
-                        examples,
+                        docs,
                     ):
                         eg.predicted = doc
         return losses

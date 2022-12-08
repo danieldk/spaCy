@@ -69,7 +69,8 @@ def create_plain_text_reader(
     def reader(nlp: "Language") -> Iterable[Doc]:
         with open(path, encoding="utf-8") as f:
             for text in f:
-                if len(text.strip()):
+                text = text.strip()
+                if len(text):
                     yield nlp.make_doc(text)
 
     return reader

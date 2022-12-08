@@ -57,13 +57,17 @@ cdef class TrainablePipe(Pipe):
 
 
     def distill(self,
-               teacher_pipe: "TrainablePipe",
+               teacher_pipe: Optional["TrainablePipe"],
                teacher_docs: Iterable["Doc"],
                student_docs: Iterable["Doc"],
                *,
                drop: float=0.0,
                sgd: Optimizer=None,
                losses: Optional[Dict[str, float]]=None) -> Dict[str, float]:
+        # By default we require a teacher pipe, but there are downstream
+        # implementations that don't require a pipe.
+        if teacher_pipe is None:
+            raise ValueError(Errors.E3000.format(name=self.name))
         if losses is None:
             losses = {}
         if not hasattr(self, "model") or self.model in (None, True, False):

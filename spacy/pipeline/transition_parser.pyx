@@ -211,6 +211,8 @@ cdef class Parser(TrainablePipe):
                drop,
                sgd,
                losses):
+        if teacher_pipe is None:
+            raise ValueError(Errors.E3000.format(name=self.name))
         if losses is None:
             losses = {}
         if not hasattr(self, "model") or self.model in (None, True, False):

@@ -1071,9 +1071,9 @@ class Language:
         for name, student_proc in self.pipeline:
             if name not in exclude and hasattr(student_proc, "distill"):
                 teacher_pipe_name = pipe_map[name] if name in pipe_map else name
-                teacher_proc = teacher_pipes[teacher_pipe_name]
+                teacher_pipe = teacher_pipes.get(teacher_pipe_name, None)
                 student_proc.distill(
-                    teacher_proc,
+                    teacher_pipe,
                     teacher_docs,
                     student_docs,
                     sgd=None,
@@ -1090,7 +1090,7 @@ class Language:
                     student_proc.finish_update(sgd)
             if name in annotates:
                 for proc, docs in zip(
-                    [teacher_proc, student_proc], [teacher_docs, student_docs]
+                    [teacher_pipe, student_proc], [teacher_docs, student_docs]
                 ):
                     for doc, eg in zip(
                         _pipe(

@@ -81,7 +81,7 @@ def distill(
     # link_rehearsal_models(teacher, student)
 
     msg.good("Initialized pipeline")
-    msg.divider("Training pipeline")
+    msg.divider("Distilling pipeline")
     distill_nlp(
         teacher,
         student,

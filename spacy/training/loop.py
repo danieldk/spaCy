@@ -57,9 +57,9 @@ def distill(
     D = registry.resolve(config["distill"], schema=ConfigSchemaDistill)
     dot_names = [D["distill_corpus"], T["dev_corpus"]]
     distill_corpus, dev_corpus = resolve_dot_names(config, dot_names)
-    optimizer = T["optimizer"]
+    optimizer = D["optimizer"]
     score_weights = T["score_weights"]
-    batcher = T["batcher"]
+    batcher = D["batcher"]
     train_logger = T["logger"]
     before_to_disk = create_before_to_disk_callback(T["before_to_disk"])
     before_update = T["before_update"]
@@ -82,16 +82,15 @@ def distill(
     # Components that should set annotations on update
     annotating_components = T["annotating_components"]
     # Create iterator, which yields out info after each optimization step.
-    training_step_iterator = distill_while_improving(
+    training_step_iterator = _distill_loop(
         teacher,
         student,
         optimizer,
-        create_distill_batches(student, distill_corpus, batcher, T["max_epochs"]),
+        create_distill_batches(student, distill_corpus, batcher, D["max_epochs"]),
         create_evaluation_callback(student, dev_corpus, score_weights),
-        dropout=T["dropout"],
+        dropout=D["dropout"],
         accumulate_gradient=T["accumulate_gradient"],
-        patience=T["patience"],
-        max_steps=T["max_steps"],
+        max_steps=D["max_steps"],
         eval_frequency=T["eval_frequency"],
         exclude=frozen_components,
         annotating_components=annotating_components,
@@ -263,7 +262,7 @@ def train(
         return (nlp, None)
 
 
-def distill_while_improving(
+def _distill_loop(
     teacher: "Language",
     student: "Language",
     optimizer: Optimizer,
@@ -273,7 +272,6 @@ def distill_while_improving(
     dropout: float,
     eval_frequency: int,
     accumulate_gradient: int,
-    patience: int,
     max_steps: int,
     exclude: List[str],
     annotating_components: List[str],
@@ -377,13 +375,6 @@ def distill_while_improving(
         yield batch, info, is_best_checkpoint
         if is_best_checkpoint is not None:
             losses = {}
-        # Stop if no improvement in `patience` updates (if specified)
-        # Negate step value so that the earliest best step is chosen for the
-        # same score, i.e. (1.0, 100) is chosen over (1.0, 200)
-        best_result = max((r_score, -r_step) for r_score, r_step in results)
-        best_step = -best_result[1]
-        if patience and (step - best_step) >= patience:
-            break
         # Stop if we've exhausted our max steps (if specified)
         if max_steps and step >= max_steps:
             break

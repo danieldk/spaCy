@@ -160,7 +160,10 @@ def init_nlp_distill(
 
         # TODO: warn if we don't have a corresponding teacher pipe?
         teacher_pipe = teacher_pipes.get(teacher_pipe_name, None)
-        if teacher_pipe is not None and getattr(teacher_pipe, "label_data", None) is not None:
+        if (
+            teacher_pipe is not None
+            and getattr(teacher_pipe, "label_data", None) is not None
+        ):
             labels[name] = teacher_pipe.label_data
 
     with nlp.select_pipes(disable=[*frozen_components, *resume_components]):

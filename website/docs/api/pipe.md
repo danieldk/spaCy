@@ -240,6 +240,42 @@ predictions and gold-standard annotations, and update the component's model.
 | `losses`       | Optional record of the loss during training. Updated using the component name as the key. ~~Optional[Dict[str, float]]~~ |
 | **RETURNS**    | The updated `losses` dictionary. ~~Dict[str, float]~~                                                                    |
 
+## TrainablePipe.distill {#rehearse tag="method,experimental" new="4"}
+
+Train a pipe (the student) on the predictions of another pipe (the teacher). The
+student is typically trained on the probability distribution of the teacher, but
+details may differ per pipe. The goal of distillation is to transfer knowledge
+from the teacher to the student. This feature is experimental.
+
+> #### Example
+>
+> ```python
+> teacher_pipe = teacher.add_pipe("your_custom_pipe")
+> student_pipe = student.add_pipe("your_custom_pipe")
+> optimizer = nlp.resume_training()
+> losses = student.distill(teacher_pipe, teacher_docs, student_docs, sgd=optimizer)
+> ```
+
+    def distill(self,
+               teacher_pipe: Optional["TrainablePipe"],
+               teacher_docs: Iterable["Doc"],
+               student_docs: Iterable["Doc"],
+               *,
+               drop: float=0.0,
+               sgd: Optimizer=None,
+               losses: Optional[Dict[str, float]]=None) -> Dict[str, float]:
+
+| Name           | Description                                                                                                                         |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `teacher_pipe` | The teacher pipe to learn from. ~~TrainablePipe~~                                                                                   |
+| `teacher_docs` | Documents passed through teacher pipes. ~~Doc~~                                                                                     |
+| `student_docs` | Documents passed through student pipes. Must contain the same tokens as `teacher_docs`, but may have different annotations. ~~Doc~~ |
+| _keyword-only_ |                                                                                                                                     |
+| `drop`         | Dropout rate. ~~Optional[Optimizer]~~                                                                                               |
+| `sgd`          | An optimizer. Will be created via [`create_optimizer`](#create_optimizer) if not set. ~~Optional[Optimizer]~~                       |
+| `losses`       | Optional record of the loss during training. Updated using the component name as the key. ~~Optional[Dict[str, float]]~~            |
+| **RETURNS**    | The updated `losses` dictionary. ~~Dict[str, float]~~                                                                               |
+
 ## TrainablePipe.rehearse {#rehearse tag="method,experimental" new="3"}
 
 Perform a "rehearsal" update from a batch of data. Rehearsal updates teach the
@@ -286,6 +322,27 @@ This method needs to be overwritten with your own custom `get_loss` method.
 | `examples`  | The batch of examples. ~~Iterable[Example]~~                                |
 | `scores`    | Scores representing the model's predictions.                                |
 | **RETURNS** | The loss and the gradient, i.e. `(loss, gradient)`. ~~Tuple[float, float]~~ |
+
+## Tagger.get_teacher_student_loss {#get_teacher_student_loss tag="method"}
+
+Find the loss and gradient of loss for the batch of student scores relative to
+the teacher scores.
+
+> #### Example
+>
+> ```python
+> teacher_tagger = teacher.get_pipe("tagger")
+> student_tagger = student.add_pipe("tagger")
+> student_scores = student_tagger.predict([eg.predicted for eg in examples])
+> teacher_scores = teacher_tagger.predict([eg.predicted for eg in examples])
+> loss, d_loss = tagger.get_teacher_student_loss(teacher_scores, student_scores)
+> ```
+
+| Name             | Description                                                                 |
+| ---------------- | --------------------------------------------------------------------------- |
+| `teacher_scores` | Scores representing the teacher model's predictions.                        |
+| `student_scores` | Scores representing the student model's predictions.                        |
+| **RETURNS**      | The loss and the gradient, i.e. `(loss, gradient)`. ~~Tuple[float, float]~~ |
 
 ## TrainablePipe.score {#score tag="method" new="3"}
 

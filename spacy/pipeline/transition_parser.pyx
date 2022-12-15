@@ -247,7 +247,7 @@ cdef class Parser(TrainablePipe):
         while states:
             teacher_scores = teacher_model.predict(states)
             student_scores, backprop = student_model.begin_update(states)
-            state_loss, d_scores = self.get_distill_loss(teacher_scores, student_scores)
+            state_loss, d_scores = self.get_teacher_student_loss(teacher_scores, student_scores)
             backprop(d_scores)
             loss += state_loss
             self.transition_states(states, student_scores)
@@ -273,7 +273,7 @@ cdef class Parser(TrainablePipe):
 
         return losses
 
-    def get_distill_loss(self, teacher_scores, student_scores):
+    def get_teacher_student_loss(self, teacher_scores, student_scores):
         loss_func = SequenceCategoricalCrossentropy(normalize=False)
         d_scores, loss = loss_func(student_scores, teacher_scores)
         if self.model.ops.xp.isnan(loss):

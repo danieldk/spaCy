@@ -83,7 +83,7 @@ cdef class TrainablePipe(Pipe):
                 node.attrs["softmax_normalize"] = True
         teacher_scores = teacher_pipe.model.predict(teacher_docs)
         student_scores, bp_student_scores = self.model.begin_update(student_docs)
-        loss, d_scores = self.get_distill_loss(teacher_scores, student_scores)
+        loss, d_scores = self.get_teacher_student_loss(teacher_scores, student_scores)
         bp_student_scores(d_scores)
         if sgd not in (None, False):
             self.finish_update(sgd)
@@ -202,6 +202,17 @@ cdef class TrainablePipe(Pipe):
         DOCS: https://spacy.io/api/pipe#get_loss
         """
         raise NotImplementedError(Errors.E931.format(parent="TrainablePipe", method="get_loss", name=self.name))
+
+    def get_teacher_student_loss(self, teacher_scores, student_scores):
+        """Find the loss and gradient of loss for a batch of student
+        scores, relative to teacher scores.
+
+        teacher_scores: Scores representing the teacher model's predictions.
+        student_scores: Scores representing the student model's predictions.
+
+        DOCS: https://spacy.io/api/pipe#get_teacher_student_loss
+        """
+        raise NotImplementedError(Errors.E931.format(parent="TrainablePipe", method="get_teacher_student_loss", name=self.name))
 
     def create_optimizer(self) -> Optimizer:
         """Create an optimizer for the pipeline component.

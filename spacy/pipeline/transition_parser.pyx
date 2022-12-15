@@ -176,6 +176,7 @@ cdef class Parser(TrainablePipe):
         return 0
 
     def _ensure_labels_are_added(self, docs):
+               
         """Ensure that all labels for a batch of docs are added."""
         resized = False
         labels = set()
@@ -208,9 +209,9 @@ cdef class Parser(TrainablePipe):
                teacher_docs,
                student_docs,
                *,
-               drop,
-               sgd,
-               losses):
+               drop=0.0,
+               sgd=None,
+               losses=None):
         if teacher_pipe is None:
             raise ValueError(Errors.E3000.format(name=self.name))
         if losses is None:

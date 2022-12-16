@@ -225,7 +225,6 @@ class Tagger(TrainablePipe):
 
         DOCS: https://spacy.io/api/tagger#rehearse
         """
-        loss_func = SequenceCategoricalCrossentropy()
         if losses is None:
             losses = {}
         losses.setdefault(self.name, 0.0)
@@ -239,11 +238,18 @@ class Tagger(TrainablePipe):
         set_dropout_rate(self.model, drop)
         tag_scores, bp_tag_scores = self.model.begin_update(docs)
         tutor_tag_scores, _ = self._rehearsal_model.begin_update(docs)
-        grads, loss = loss_func(tag_scores, tutor_tag_scores)
+        loss, grads = self.get_teacher_student_loss(tutor_tag_scores, tag_scores)
         bp_tag_scores(grads)
         self.finish_update(sgd)
         losses[self.name] += loss
         return losses
+
+    def get_teacher_student_loss(self, teacher_scores, student_scores):
+        loss_func = SequenceCategoricalCrossentropy(normalize=False)
+        d_scores, loss = loss_func(student_scores, teacher_scores)
+        if self.model.ops.xp.isnan(loss):
+            raise ValueError(Errors.E910.format(name=self.name))
+        return float(loss), d_scores
 
     def get_loss(self, examples, scores):
         """Find the loss and gradient of loss for the batch of documents and

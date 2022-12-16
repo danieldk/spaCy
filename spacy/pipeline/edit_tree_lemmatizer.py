@@ -143,6 +143,13 @@ class EditTreeLemmatizer(TrainablePipe):
 
         return float(loss), d_scores
 
+    def get_teacher_student_loss(self, teacher_scores, student_scores):
+        loss_func = SequenceCategoricalCrossentropy(normalize=False)
+        d_scores, loss = loss_func(student_scores, teacher_scores)
+        if self.model.ops.xp.isnan(loss):
+            raise ValueError(Errors.E910.format(name=self.name))
+        return float(loss), d_scores
+
     def predict(self, docs: Iterable[Doc]) -> List[Ints2d]:
         n_docs = len(list(docs))
         if not any(len(doc) for doc in docs):

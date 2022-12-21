@@ -226,7 +226,7 @@ cdef class Parser(TrainablePipe):
         drop (float): dropout rate.
         sgd (Optional[Optimizer]): An optimizer. Will be created via
             create_optimizer if not set.
-        losses (Optional[Dict[str, float]]): optional record of loss during
+        losses (Optional[Dict[str, float]]): Optional record of loss during
             distillation.
         RETURNS: The updated losses dictionary.
         """
@@ -311,7 +311,7 @@ cdef class Parser(TrainablePipe):
         teacher_scores: Scores representing the teacher model's predictions.
         student_scores: Scores representing the student model's predictions.
 
-        DOCS: https://spacy.io/api/tagger#get_teacher_student_loss
+        DOCS: https://spacy.io/api/dependencyparser#get_teacher_student_loss
         """
         loss_func = SequenceCategoricalCrossentropy(normalize=False)
         d_scores, loss = loss_func(student_scores, teacher_scores)

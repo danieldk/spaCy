@@ -77,7 +77,7 @@ cdef class TrainablePipe(Pipe):
         drop (float): dropout rate.
         sgd (Optional[Optimizer]): An optimizer. Will be created via
             create_optimizer if not set.
-        losses (Optional[Dict[str, float]]): optional record of loss during
+        losses (Optional[Dict[str, float]]): Optional record of loss during
             distillation.
         RETURNS: The updated losses dictionary.
         """

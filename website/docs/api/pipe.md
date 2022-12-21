@@ -258,11 +258,11 @@ from the teacher to the student. This feature is experimental.
 
 | Name           | Description                                                                                                                                  |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `teacher_pipe` | The teacher pipe to learn from. ~~TrainablePipe~~                                                                                            |
+| `teacher_pipe` | The teacher pipe to learn from. ~~Optional[TrainablePipe]~~                                                                                  |
 | `teacher_docs` | Documents passed through teacher pipes. ~~Iterable[Doc]~~                                                                                    |
 | `student_docs` | Documents passed through student pipes. Must contain the same tokens as `teacher_docs` but may have different annotations. ~~Iterable[Doc]~~ |
 | _keyword-only_ |                                                                                                                                              |
-| `drop`         | Dropout rate. ~~Optional[Optimizer]~~                                                                                                        |
+| `drop`         | Dropout rate. ~~float~~                                                                                                                      |
 | `sgd`          | An optimizer. Will be created via [`create_optimizer`](#create_optimizer) if not set. ~~Optional[Optimizer]~~                                |
 | `losses`       | Optional record of the loss during distillation. Updated using the component name as the key. ~~Optional[Dict[str, float]]~~                 |
 | **RETURNS**    | The updated `losses` dictionary. ~~Dict[str, float]~~                                                                                        |

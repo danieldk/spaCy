@@ -254,7 +254,7 @@ class Tagger(TrainablePipe):
         teacher_scores: Scores representing the teacher model's predictions.
         student_scores: Scores representing the student model's predictions.
 
-        DOCS: https://spacy.io/api/dependencyparser#get_teacher_student_loss
+        DOCS: https://spacy.io/api/tagger#get_teacher_student_loss
         """
         loss_func = SequenceCategoricalCrossentropy(normalize=False)
         d_scores, loss = loss_func(student_scores, teacher_scores)

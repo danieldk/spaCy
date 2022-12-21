@@ -176,7 +176,6 @@ cdef class Parser(TrainablePipe):
         return 0
 
     def _ensure_labels_are_added(self, docs):
-               
         """Ensure that all labels for a batch of docs are added."""
         resized = False
         labels = set()
@@ -243,7 +242,7 @@ cdef class Parser(TrainablePipe):
         else:
             states = self.moves.init_batch(student_docs)
 
-        loss = 0.
+        loss = 0.0
         n_moves = 0
         while states:
             teacher_scores = teacher_model.predict(states)
@@ -709,7 +708,7 @@ cdef class Parser(TrainablePipe):
         return self
 
     def _init_batch(self, teacher_step_model, docs, max_length):
-        """Make a square batch, of length equal to the shortest transition
+        """Make a square batch of length equal to the shortest transition
         sequence or a cap. A long
         doc will get multiple states. Let's say we have a doc of length 2*N,
         where N is the shortest doc. We'll make two states, one representing

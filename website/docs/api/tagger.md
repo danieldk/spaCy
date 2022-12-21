@@ -272,7 +272,7 @@ predicted scores.
 
 ## Tagger.get_teacher_student_loss {#get_teacher_student_loss tag="method" new="4"}
 
-Find the loss and gradient of loss for the batch of student scores relative to
+Calculate the loss and its gradient for the batch of student scores relative to
 the teacher scores.
 
 > #### Example
@@ -282,7 +282,7 @@ the teacher scores.
 > student_tagger = student.add_pipe("tagger")
 > student_scores = student_tagger.predict([eg.predicted for eg in examples])
 > teacher_scores = teacher_tagger.predict([eg.predicted for eg in examples])
-> loss, d_loss = tagger.get_teacher_student_loss(teacher_scores, student_scores)
+> loss, d_loss = student_tagger.get_teacher_student_loss(teacher_scores, student_scores)
 > ```
 
 | Name             | Description                                                                 |

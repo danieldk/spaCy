@@ -260,7 +260,7 @@ predicted scores.
 
 ## Morphologizer.get_teacher_student_loss {#get_teacher_student_loss tag="method" new="4"}
 
-Find the loss and gradient of loss for the batch of student scores relative to
+Calculate the loss and its gradient for the batch of student scores relative to
 the teacher scores.
 
 > #### Example
@@ -270,7 +270,7 @@ the teacher scores.
 > student_morphologizer = student.add_pipe("morphologizer")
 > student_scores = student_morphologizer.predict([eg.predicted for eg in examples])
 > teacher_scores = teacher_morphologizer.predict([eg.predicted for eg in examples])
-> loss, d_loss = morphologizer.get_teacher_student_loss(teacher_scores, student_scores)
+> loss, d_loss = student_morphologizer.get_teacher_student_loss(teacher_scores, student_scores)
 > ```
 
 | Name             | Description                                                                 |

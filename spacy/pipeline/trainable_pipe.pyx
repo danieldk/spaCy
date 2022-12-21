@@ -62,7 +62,7 @@ cdef class TrainablePipe(Pipe):
                student_docs: Iterable["Doc"],
                *,
                drop: float=0.0,
-               sgd: Optimizer=None,
+               sgd: Optional[Optimizer]=None,
                losses: Optional[Dict[str, float]]=None) -> Dict[str, float]:
         # By default we require a teacher pipe, but there are downstream
         # implementations that don't require a pipe.
@@ -85,7 +85,7 @@ cdef class TrainablePipe(Pipe):
         student_scores, bp_student_scores = self.model.begin_update(student_docs)
         loss, d_scores = self.get_teacher_student_loss(teacher_scores, student_scores)
         bp_student_scores(d_scores)
-        if sgd not in (None, False):
+        if sgd is not None:
             self.finish_update(sgd)
         losses[self.name] += loss
         return losses
@@ -204,7 +204,7 @@ cdef class TrainablePipe(Pipe):
         raise NotImplementedError(Errors.E931.format(parent="TrainablePipe", method="get_loss", name=self.name))
 
     def get_teacher_student_loss(self, teacher_scores, student_scores):
-        """Find the loss and gradient of loss for a batch of student
+        """Calculate the loss and its gradient for a batch of student
         scores, relative to teacher scores.
 
         teacher_scores: Scores representing the teacher model's predictions.

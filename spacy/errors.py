@@ -963,7 +963,7 @@ class Errors(metaclass=ErrorsWithCodes):
              "knowledge base, use `InMemoryLookupKB`.")
     E1047 = ("`find_threshold()` only supports components with a `scorer` attribute.")
 
-    # Rename once we are ready for mainstream spaCy.
+    # TODO: Rename once we are ready for mainstream spaCy.
     E3000 = ("Pipe '{name}' requires teacher pipe for distillation.")
 
 

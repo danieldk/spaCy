@@ -256,17 +256,16 @@ from the teacher to the student. This feature is experimental.
 > losses = student.distill(teacher_pipe, teacher_docs, student_docs, sgd=optimizer)
 > ```
 
-
-| Name           | Description                                                                                                                         |
-| -------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `teacher_pipe` | The teacher pipe to learn from. ~~TrainablePipe~~                                                                                   |
-| `teacher_docs` | Documents passed through teacher pipes. ~~Iterable[Doc]~~                                                                                     |
+| Name           | Description                                                                                                                                  |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `teacher_pipe` | The teacher pipe to learn from. ~~TrainablePipe~~                                                                                            |
+| `teacher_docs` | Documents passed through teacher pipes. ~~Iterable[Doc]~~                                                                                    |
 | `student_docs` | Documents passed through student pipes. Must contain the same tokens as `teacher_docs` but may have different annotations. ~~Iterable[Doc]~~ |
-| _keyword-only_ |                                                                                                                                     |
-| `drop`         | Dropout rate. ~~Optional[Optimizer]~~                                                                                               |
-| `sgd`          | An optimizer. Will be created via [`create_optimizer`](#create_optimizer) if not set. ~~Optional[Optimizer]~~                       |
-| `losses`       | Optional record of the loss during training. Updated using the component name as the key. ~~Optional[Dict[str, float]]~~            |
-| **RETURNS**    | The updated `losses` dictionary. ~~Dict[str, float]~~                                                                               |
+| _keyword-only_ |                                                                                                                                              |
+| `drop`         | Dropout rate. ~~Optional[Optimizer]~~                                                                                                        |
+| `sgd`          | An optimizer. Will be created via [`create_optimizer`](#create_optimizer) if not set. ~~Optional[Optimizer]~~                                |
+| `losses`       | Optional record of the loss during distillation. Updated using the component name as the key. ~~Optional[Dict[str, float]]~~                 |
+| **RETURNS**    | The updated `losses` dictionary. ~~Dict[str, float]~~                                                                                        |
 
 ## TrainablePipe.rehearse {#rehearse tag="method,experimental" new="3"}
 

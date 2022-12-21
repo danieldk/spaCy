@@ -64,6 +64,23 @@ cdef class TrainablePipe(Pipe):
                drop: float=0.0,
                sgd: Optional[Optimizer]=None,
                losses: Optional[Dict[str, float]]=None) -> Dict[str, float]:
+        """Train a pipe (the student) on the predictions of another pipe
+        (the teacher). The student is typically trained on the probability
+        distribution of the teacher, but details may differ per pipe.
+
+        teacher_pipe (Optional[TrainablePipe]): The teacher pipe to learn
+            from.
+        teacher_docs (Iterable[Doc]): Documents passed through teacher pipes.
+        student_docs (Iterable[Doc]): Documents passed through student pipes.
+            Must contain the same tokens as `teacher_docs` but may have
+            different annotations.
+        drop (float): dropout rate.
+        sgd (Optional[Optimizer]): An optimizer. Will be created via
+            create_optimizer if not set.
+        losses (Optional[Dict[str, float]]): optional record of loss during
+            distillation.
+        RETURNS: The updated losses dictionary.
+        """
         # By default we require a teacher pipe, but there are downstream
         # implementations that don't require a pipe.
         if teacher_pipe is None:

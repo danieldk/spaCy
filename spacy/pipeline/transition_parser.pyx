@@ -1,5 +1,6 @@
 # cython: infer_types=True, cdivision=True, boundscheck=False, binding=True
 from __future__ import print_function
+from typing import Dict, Iterable, List, Optional, Tuple
 from cymem.cymem cimport Pool
 cimport numpy as np
 from itertools import islice
@@ -9,9 +10,10 @@ from libc.stdlib cimport calloc, free
 import random
 
 import srsly
-from thinc.api import get_ops, set_dropout_rate, CupyOps, NumpyOps
+from thinc.api import get_ops, set_dropout_rate, CupyOps, NumpyOps, Optimizer
 from thinc.api import SequenceCategoricalCrossentropy, chain, softmax_activation, use_ops
 from thinc.extra.search cimport Beam
+from thinc.types import Floats2d
 import numpy.random
 import numpy
 import warnings
@@ -204,13 +206,30 @@ cdef class Parser(TrainablePipe):
         raise NotImplementedError
 
     def distill(self,
-               teacher_pipe,
-               teacher_docs,
-               student_docs,
+               teacher_pipe: Optional[TrainablePipe],
+               teacher_docs: Iterable[Doc],
+               student_docs: Iterable[Doc],
                *,
-               drop=0.0,
-               sgd=None,
-               losses=None):
+               drop: float=0.0,
+               sgd: Optional[Optimizer]=None,
+               losses: Optional[Dict[str, float]]=None):
+        """Train a pipe (the student) on the predictions of another pipe
+        (the teacher). The student is trained on the transition probabilities
+        of the teacher.
+
+        teacher_pipe (Optional[TrainablePipe]): The teacher pipe to learn
+            from.
+        teacher_docs (Iterable[Doc]): Documents passed through teacher pipes.
+        student_docs (Iterable[Doc]): Documents passed through student pipes.
+            Must contain the same tokens as `teacher_docs` but may have
+            different annotations.
+        drop (float): dropout rate.
+        sgd (Optional[Optimizer]): An optimizer. Will be created via
+            create_optimizer if not set.
+        losses (Optional[Dict[str, float]]): optional record of loss during
+            distillation.
+        RETURNS: The updated losses dictionary.
+        """
         if teacher_pipe is None:
             raise ValueError(Errors.E3000.format(name=self.name))
         if losses is None:
@@ -229,6 +248,8 @@ cdef class Parser(TrainablePipe):
         teacher_step_model = teacher_pipe.model.predict(teacher_docs)
         student_step_model, backprop_tok2vec = self.model.begin_update(student_docs)
 
+        # Add softmax activation, so that we can compute student losses
+        # with cross-entropy loss.
         with use_ops("numpy"):
             teacher_model = chain(teacher_step_model, softmax_activation())
             student_model = chain(student_step_model, softmax_activation())
@@ -236,7 +257,9 @@ cdef class Parser(TrainablePipe):
         max_moves = self.cfg["update_with_oracle_cut_size"]
         if max_moves >= 1:
             # Chop sequences into lengths of this many words, to make the
-            # batch uniform length.
+            # batch uniform length. Since we do not have a gold standard
+            # sequence, we use the teacher's predictions as the gold
+            # standard.
             max_moves = int(random.uniform(max_moves // 2, max_moves * 2))
             states = self._init_batch(teacher_step_model, student_docs, max_moves)
         else:
@@ -245,6 +268,11 @@ cdef class Parser(TrainablePipe):
         loss = 0.0
         n_moves = 0
         while states:
+            # We do distillation as follows: (1) for every state, we compute the
+            # transition softmax distributions: (2) we backpropagate the error of
+            # the student (compared to the teacher) into the student model; (3)
+            # for all states, we move to the next state using the student's
+            # predictions.
             teacher_scores = teacher_model.predict(states)
             student_scores, backprop = student_model.begin_update(states)
             state_loss, d_scores = self.get_teacher_student_loss(teacher_scores, student_scores)
@@ -253,6 +281,8 @@ cdef class Parser(TrainablePipe):
             self.transition_states(states, student_scores)
             states = [state for state in states if not state.is_final()]
 
+            # Stop when we reach the maximum number of moves, otherwise we start
+            # to process the remainder of cut sequences again.
             if max_moves >= 1 and n_moves >= max_moves:
                 break
             n_moves += 1
@@ -273,7 +303,18 @@ cdef class Parser(TrainablePipe):
 
         return losses
 
-    def get_teacher_student_loss(self, teacher_scores, student_scores):
+
+    def get_teacher_student_loss(
+        self, teacher_scores: List[Floats2d], student_scores: List[Floats2d]
+    ) -> Tuple[float, List[Floats2d]]:
+        """Calculate the loss and its gradient for a batch of student
+        scores, relative to teacher scores.
+
+        teacher_scores: Scores representing the teacher model's predictions.
+        student_scores: Scores representing the student model's predictions.
+
+        DOCS: https://spacy.io/api/tagger#get_teacher_student_loss
+        """
         loss_func = SequenceCategoricalCrossentropy(normalize=False)
         d_scores, loss = loss_func(student_scores, teacher_scores)
         if self.model.ops.xp.isnan(loss):

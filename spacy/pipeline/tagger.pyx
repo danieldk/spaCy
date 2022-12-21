@@ -1,5 +1,5 @@
 # cython: infer_types=True, profile=True, binding=True
-from typing import Callable, Optional
+from typing import Callable, List, Optional, Tuple
 import numpy
 import srsly
 from thinc.api import Model, set_dropout_rate, SequenceCategoricalCrossentropy, Config
@@ -244,7 +244,17 @@ class Tagger(TrainablePipe):
         losses[self.name] += loss
         return losses
 
-    def get_teacher_student_loss(self, teacher_scores, student_scores):
+    def get_teacher_student_loss(
+        self, teacher_scores: List[Floats2d], student_scores: List[Floats2d]
+    ) -> Tuple[float, List[Floats2d]]:
+        """Calculate the loss and its gradient for a batch of student
+        scores, relative to teacher scores.
+
+        teacher_scores: Scores representing the teacher model's predictions.
+        student_scores: Scores representing the student model's predictions.
+
+        DOCS: https://spacy.io/api/dependencyparser#get_teacher_student_loss
+        """
         loss_func = SequenceCategoricalCrossentropy(normalize=False)
         d_scores, loss = loss_func(student_scores, teacher_scores)
         if self.model.ops.xp.isnan(loss):

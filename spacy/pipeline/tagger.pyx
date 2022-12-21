@@ -240,7 +240,8 @@ class Tagger(TrainablePipe):
         tutor_tag_scores, _ = self._rehearsal_model.begin_update(docs)
         loss, grads = self.get_teacher_student_loss(tutor_tag_scores, tag_scores)
         bp_tag_scores(grads)
-        self.finish_update(sgd)
+        if sgd is not None:
+            self.finish_update(sgd)
         losses[self.name] += loss
         return losses
 

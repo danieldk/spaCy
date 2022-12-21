@@ -87,8 +87,6 @@ cdef class TrainablePipe(Pipe):
             raise ValueError(Errors.E3000.format(name=self.name))
         if losses is None:
             losses = {}
-        if not hasattr(self, "model") or self.model in (None, True, False):
-            return losses
         losses.setdefault(self.name, 0.0)
         if not any(len(doc) for doc in teacher_docs):
             return losses

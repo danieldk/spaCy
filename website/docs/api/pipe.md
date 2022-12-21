@@ -321,7 +321,7 @@ the teacher scores.
 
 <Infobox variant="danger">
 
-This method needs to be overwritten with your own custom `predict` method.
+This method needs to be overwritten with your own custom `get_teacher_student_loss` method.
 
 </Infobox>
 

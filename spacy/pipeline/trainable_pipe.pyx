@@ -62,16 +62,31 @@ cdef class TrainablePipe(Pipe):
                student_docs: Iterable["Doc"],
                *,
                drop: float=0.0,
-               sgd: Optimizer=None,
+               sgd: Optional[Optimizer]=None,
                losses: Optional[Dict[str, float]]=None) -> Dict[str, float]:
+        """Train a pipe (the student) on the predictions of another pipe
+        (the teacher). The student is typically trained on the probability
+        distribution of the teacher, but details may differ per pipe.
+
+        teacher_pipe (Optional[TrainablePipe]): The teacher pipe to learn
+            from.
+        teacher_docs (Iterable[Doc]): Documents passed through teacher pipes.
+        student_docs (Iterable[Doc]): Documents passed through student pipes.
+            Must contain the same tokens as `teacher_docs` but may have
+            different annotations.
+        drop (float): dropout rate.
+        sgd (Optional[Optimizer]): An optimizer. Will be created via
+            create_optimizer if not set.
+        losses (Optional[Dict[str, float]]): Optional record of loss during
+            distillation.
+        RETURNS: The updated losses dictionary.
+        """
         # By default we require a teacher pipe, but there are downstream
         # implementations that don't require a pipe.
         if teacher_pipe is None:
             raise ValueError(Errors.E3000.format(name=self.name))
         if losses is None:
             losses = {}
-        if not hasattr(self, "model") or self.model in (None, True, False):
-            return losses
         losses.setdefault(self.name, 0.0)
         if not any(len(doc) for doc in teacher_docs):
             return losses
@@ -85,7 +100,7 @@ cdef class TrainablePipe(Pipe):
         student_scores, bp_student_scores = self.model.begin_update(student_docs)
         loss, d_scores = self.get_teacher_student_loss(teacher_scores, student_scores)
         bp_student_scores(d_scores)
-        if sgd not in (None, False):
+        if sgd is not None:
             self.finish_update(sgd)
         losses[self.name] += loss
         return losses
@@ -204,7 +219,7 @@ cdef class TrainablePipe(Pipe):
         raise NotImplementedError(Errors.E931.format(parent="TrainablePipe", method="get_loss", name=self.name))
 
     def get_teacher_student_loss(self, teacher_scores, student_scores):
-        """Find the loss and gradient of loss for a batch of student
+        """Calculate the loss and its gradient for a batch of student
         scores, relative to teacher scores.
 
         teacher_scores: Scores representing the teacher model's predictions.

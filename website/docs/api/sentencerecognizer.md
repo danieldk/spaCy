@@ -255,7 +255,7 @@ predicted scores.
 
 ## SentenceRecognizer.get_teacher_student_loss {#get_teacher_student_loss tag="method" new="4"}
 
-Find the loss and gradient of loss for the batch of student scores relative to
+Calculate the loss and its gradient for the batch of student scores relative to
 the teacher scores.
 
 > #### Example
@@ -265,7 +265,7 @@ the teacher scores.
 > student_senter = student.add_pipe("senter")
 > student_scores = student_senter.predict([eg.predicted for eg in examples])
 > teacher_scores = teacher_senter.predict([eg.predicted for eg in examples])
-> loss, d_loss = senter.get_teacher_student_loss(teacher_scores, student_scores)
+> loss, d_loss = student_senter.get_teacher_student_loss(teacher_scores, student_scores)
 > ```
 
 | Name             | Description                                                                 |

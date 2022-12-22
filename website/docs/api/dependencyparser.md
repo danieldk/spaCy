@@ -276,7 +276,7 @@ predicted scores.
 
 ## DependencyParser.get_teacher_student_loss {#get_teacher_student_loss tag="method" new="4"}
 
-Find the loss and gradient of loss for the batch of student scores relative to
+Calculate the loss and its gradient for the batch of student scores relative to
 the teacher scores.
 
 > #### Example
@@ -286,7 +286,7 @@ the teacher scores.
 > student_parser = student.add_pipe("parser")
 > student_scores = student_parser.predict([eg.predicted for eg in examples])
 > teacher_scores = teacher_parser.predict([eg.predicted for eg in examples])
-> loss, d_loss = parser.get_teacher_student_loss(teacher_scores, student_scores)
+> loss, d_loss = student_parser.get_teacher_student_loss(teacher_scores, student_scores)
 > ```
 
 | Name             | Description                                                                 |

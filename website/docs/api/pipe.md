@@ -256,25 +256,16 @@ from the teacher to the student. This feature is experimental.
 > losses = student.distill(teacher_pipe, teacher_docs, student_docs, sgd=optimizer)
 > ```
 
-    def distill(self,
-               teacher_pipe: Optional["TrainablePipe"],
-               teacher_docs: Iterable["Doc"],
-               student_docs: Iterable["Doc"],
-               *,
-               drop: float=0.0,
-               sgd: Optimizer=None,
-               losses: Optional[Dict[str, float]]=None) -> Dict[str, float]:
-
-| Name           | Description                                                                                                                         |
-| -------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `teacher_pipe` | The teacher pipe to learn from. ~~TrainablePipe~~                                                                                   |
-| `teacher_docs` | Documents passed through teacher pipes. ~~Doc~~                                                                                     |
-| `student_docs` | Documents passed through student pipes. Must contain the same tokens as `teacher_docs`, but may have different annotations. ~~Doc~~ |
-| _keyword-only_ |                                                                                                                                     |
-| `drop`         | Dropout rate. ~~Optional[Optimizer]~~                                                                                               |
-| `sgd`          | An optimizer. Will be created via [`create_optimizer`](#create_optimizer) if not set. ~~Optional[Optimizer]~~                       |
-| `losses`       | Optional record of the loss during training. Updated using the component name as the key. ~~Optional[Dict[str, float]]~~            |
-| **RETURNS**    | The updated `losses` dictionary. ~~Dict[str, float]~~                                                                               |
+| Name           | Description                                                                                                                                  |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `teacher_pipe` | The teacher pipe to learn from. ~~Optional[TrainablePipe]~~                                                                                  |
+| `teacher_docs` | Documents passed through teacher pipes. ~~Iterable[Doc]~~                                                                                    |
+| `student_docs` | Documents passed through student pipes. Must contain the same tokens as `teacher_docs` but may have different annotations. ~~Iterable[Doc]~~ |
+| _keyword-only_ |                                                                                                                                              |
+| `drop`         | Dropout rate. ~~float~~                                                                                                                      |
+| `sgd`          | An optimizer. Will be created via [`create_optimizer`](#create_optimizer) if not set. ~~Optional[Optimizer]~~                                |
+| `losses`       | Optional record of the loss during distillation. Updated using the component name as the key. ~~Optional[Dict[str, float]]~~                 |
+| **RETURNS**    | The updated `losses` dictionary. ~~Dict[str, float]~~                                                                                        |
 
 ## TrainablePipe.rehearse {#rehearse tag="method,experimental" new="3"}
 
@@ -323,19 +314,25 @@ This method needs to be overwritten with your own custom `get_loss` method.
 | `scores`    | Scores representing the model's predictions.                                |
 | **RETURNS** | The loss and the gradient, i.e. `(loss, gradient)`. ~~Tuple[float, float]~~ |
 
-## Tagger.get_teacher_student_loss {#get_teacher_student_loss tag="method"}
+## TrainablePipe.get_teacher_student_loss {#get_teacher_student_loss tag="method"}
 
-Find the loss and gradient of loss for the batch of student scores relative to
+Calculate the loss and its gradient for the batch of student scores relative to
 the teacher scores.
+
+<Infobox variant="danger">
+
+This method needs to be overwritten with your own custom `get_teacher_student_loss` method.
+
+</Infobox>
 
 > #### Example
 >
 > ```python
-> teacher_tagger = teacher.get_pipe("tagger")
-> student_tagger = student.add_pipe("tagger")
-> student_scores = student_tagger.predict([eg.predicted for eg in examples])
-> teacher_scores = teacher_tagger.predict([eg.predicted for eg in examples])
-> loss, d_loss = tagger.get_teacher_student_loss(teacher_scores, student_scores)
+> teacher_pipe = teacher.get_pipe("your_custom_pipe")
+> student_pipe = student.add_pipe("your_custom_pipe")
+> student_scores = student_pipe.predict([eg.predicted for eg in examples])
+> teacher_scores = teacher_pipe.predict([eg.predicted for eg in examples])
+> loss, d_loss = student_pipe.get_teacher_student_loss(teacher_scores, student_scores)
 > ```
 
 | Name             | Description                                                                 |

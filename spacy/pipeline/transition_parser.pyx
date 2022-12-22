@@ -11,7 +11,7 @@ import random
 
 import srsly
 from thinc.api import get_ops, set_dropout_rate, CupyOps, NumpyOps, Optimizer
-from thinc.api import SequenceCategoricalCrossentropy, chain, softmax_activation, use_ops
+from thinc.api import LegacySequenceCategoricalCrossentropy, chain, softmax_activation, use_ops
 from thinc.extra.search cimport Beam
 from thinc.types import Floats2d
 import numpy.random
@@ -19,6 +19,7 @@ import numpy
 import warnings
 
 from ._parser_internals.stateclass cimport StateClass
+from ._parser_internals.search cimport Beam
 from ..ml.parser_model cimport alloc_activations, free_activations
 from ..ml.parser_model cimport predict_states, arg_max_if_valid
 from ..ml.parser_model cimport WeightsC, ActivationsC, SizesC, cpu_log_loss
@@ -126,6 +127,7 @@ cdef class Parser(TrainablePipe):
 
         self._rehearsal_model = None
         self.scorer = scorer
+        self._cpu_ops = get_ops("cpu") if isinstance(self.model.ops, CupyOps) else self.model.ops
 
     def __getnewargs_ex__(self):
         """This allows pickling the Parser and its keyword-only init arguments"""
@@ -231,7 +233,7 @@ cdef class Parser(TrainablePipe):
         RETURNS: The updated losses dictionary.
         """
         if teacher_pipe is None:
-            raise ValueError(Errors.E3000.format(name=self.name))
+            raise ValueError(Errors.E4002.format(name=self.name))
         if losses is None:
             losses = {}
         losses.setdefault(self.name, 0.0)
@@ -313,7 +315,7 @@ cdef class Parser(TrainablePipe):
 
         DOCS: https://spacy.io/api/dependencyparser#get_teacher_student_loss
         """
-        loss_func = SequenceCategoricalCrossentropy(normalize=False)
+        loss_func = LegacySequenceCategoricalCrossentropy(normalize=False)
         d_scores, loss = loss_func(student_scores, teacher_scores)
         if self.model.ops.xp.isnan(loss):
             raise ValueError(Errors.E910.format(name=self.name))
@@ -379,12 +381,7 @@ cdef class Parser(TrainablePipe):
     def greedy_parse(self, docs, drop=0.):
         cdef vector[StateC*] states
         cdef StateClass state
-        ops = self.model.ops
-        cdef CBlas cblas
-        if isinstance(ops, CupyOps):
-            cblas = NUMPY_OPS.cblas()
-        else:
-            cblas = ops.cblas()
+        cdef CBlas cblas = self._cpu_ops.cblas()
         self._ensure_labels_are_added(docs)
         set_dropout_rate(self.model, drop)
         batch = self.moves.init_batch(docs)

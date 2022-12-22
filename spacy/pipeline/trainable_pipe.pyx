@@ -2,11 +2,12 @@
 from typing import Iterable, Iterator, Optional, Dict, Tuple, Callable
 import srsly
 from thinc.api import set_dropout_rate, Model, Optimizer
+import warnings
 
 from ..tokens.doc cimport Doc
 
 from ..training import validate_examples
-from ..errors import Errors
+from ..errors import Errors, Warnings
 from .pipe import Pipe, deserialize_config
 from .. import util
 from ..vocab import Vocab
@@ -84,7 +85,7 @@ cdef class TrainablePipe(Pipe):
         # By default we require a teacher pipe, but there are downstream
         # implementations that don't require a pipe.
         if teacher_pipe is None:
-            raise ValueError(Errors.E3000.format(name=self.name))
+            raise ValueError(Errors.E4002.format(name=self.name))
         if losses is None:
             losses = {}
         losses.setdefault(self.name, 0.0)
@@ -403,3 +404,11 @@ cdef class TrainablePipe(Pipe):
         deserialize["model"] = load_model
         util.from_disk(path, deserialize, exclude)
         return self
+
+    @property
+    def save_activations(self):
+        return self._save_activations
+
+    @save_activations.setter
+    def save_activations(self, save_activations: bool):
+        self._save_activations = save_activations

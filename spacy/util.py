@@ -37,16 +37,10 @@ try:
 except ImportError:
     cupy = None
 
-# These are functions that were previously (v2.x) available from spacy.util
-# and have since moved to Thinc. We're importing them here so people's code
-# doesn't break, but they should always be imported from Thinc from now on,
-# not from spacy.util.
-from thinc.api import fix_random_seed, compounding, decaying  # noqa: F401
-
 
 from .symbols import ORTH
 from .compat import cupy, CudaStream, is_windows, importlib_metadata
-from .errors import Errors, Warnings, OLD_MODEL_SHORTCUTS
+from .errors import Errors, Warnings
 from . import about
 
 if TYPE_CHECKING:
@@ -433,8 +427,6 @@ def load_model(
             return load_model_from_path(Path(name), **kwargs)  # type: ignore[arg-type]
     elif hasattr(name, "exists"):  # Path or Path-like to model data
         return load_model_from_path(name, **kwargs)  # type: ignore[arg-type]
-    if name in OLD_MODEL_SHORTCUTS:
-        raise IOError(Errors.E941.format(name=name, full=OLD_MODEL_SHORTCUTS[name]))  # type: ignore[index]
     raise IOError(Errors.E050.format(name=name))
 
 

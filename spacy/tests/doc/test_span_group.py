@@ -1,7 +1,10 @@
+from typing import List
+
 import pytest
 from random import Random
 from spacy.matcher import Matcher
-from spacy.tokens import Span, SpanGroup
+from spacy.tokens import Span, SpanGroup, Doc
+from spacy.util import filter_spans
 
 
 @pytest.fixture
@@ -99,8 +102,10 @@ def test_span_group_set_item(doc, other_doc):
     span.label_ = "NEW LABEL"
     span.kb_id = doc.vocab.strings["KB_ID"]
 
-    assert span_group[index].label != span.label
-    assert span_group[index].kb_id != span.kb_id
+    # Indexing a span group returns a span in which C
+    # data is shared.
+    assert span_group[index].label == span.label
+    assert span_group[index].kb_id == span.kb_id
 
     span_group[index] = span
     assert span_group[index].start == span.start
@@ -240,3 +245,13 @@ def test_span_group_extend(doc):
 def test_span_group_dealloc(span_group):
     with pytest.raises(AttributeError):
         print(span_group.doc)
+
+
+@pytest.mark.issue(11975)
+def test_span_group_typing(doc: Doc):
+    """Tests whether typing of `SpanGroup` as `Iterable[Span]`-like object is accepted by mypy."""
+    span_group: SpanGroup = doc.spans["SPANS"]
+    spans: List[Span] = list(span_group)
+    for i, span in enumerate(span_group):
+        assert span == span_group[i] == spans[i]
+    filter_spans(span_group)

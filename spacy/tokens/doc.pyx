@@ -19,7 +19,7 @@ import warnings
 
 from .span cimport Span
 from .token cimport MISSING_DEP
-from ._dict_proxies import SpanGroups
+from .span_groups import SpanGroups
 from .token cimport Token
 from ..lexeme cimport Lexeme, EMPTY_LEXEME
 from ..typedefs cimport attr_t, flags_t
@@ -35,8 +35,8 @@ from .. import util
 from .. import parts_of_speech
 from .. import schemas
 from .underscore import Underscore, get_ext_args
-from ._retokenize import Retokenizer
-from ._serialize import ALL_ATTRS as DOCBIN_ALL_ATTRS
+from .retokenizer import Retokenizer
+from .doc_bin import ALL_ATTRS as DOCBIN_ALL_ATTRS
 from ..util import get_words_and_spaces
 
 DEF PADDING = 5
@@ -243,8 +243,8 @@ cdef class Doc:
         self.c = data_start + PADDING
         self.max_length = size
         self.length = 0
-        self.sentiment = 0.0
         self.cats = {}
+        self.activations = {}
         self.user_hooks = {}
         self.user_token_hooks = {}
         self.user_span_hooks = {}
@@ -809,27 +809,33 @@ cdef class Doc:
                     self.c[i].ent_iob = 1
                 self.c[i].ent_type = span.label
                 self.c[i].ent_kb_id = span.kb_id
-                # for backwards compatibility in v3, only set ent_id from
-                # span.id if it's set, otherwise don't override
-                self.c[i].ent_id = span.id if span.id else self.c[i].ent_id
+                self.c[i].ent_id = span.id
         for span in blocked:
             for i in range(span.start, span.end):
                 self.c[i].ent_iob = 3
                 self.c[i].ent_type = 0
+                self.c[i].ent_kb_id = 0
+                self.c[i].ent_id = 0
         for span in missing:
             for i in range(span.start, span.end):
                 self.c[i].ent_iob = 0
                 self.c[i].ent_type = 0
+                self.c[i].ent_kb_id = 0
+                self.c[i].ent_id = 0
         for span in outside:
             for i in range(span.start, span.end):
                 self.c[i].ent_iob = 2
                 self.c[i].ent_type = 0
+                self.c[i].ent_kb_id = 0
+                self.c[i].ent_id = 0
 
         # Set tokens outside of all provided spans
         if default != SetEntsDefault.unmodified:
             for i in range(self.length):
                 if i not in seen_tokens:
                     self.c[i].ent_type = 0
+                    self.c[i].ent_kb_id = 0
+                    self.c[i].ent_id = 0
                     if default == SetEntsDefault.outside:
                         self.c[i].ent_iob = 2
                     elif default == SetEntsDefault.missing:
@@ -969,22 +975,26 @@ cdef class Doc:
             py_attr_ids = [(IDS[id_.upper()] if hasattr(id_, "upper") else id_)
                        for id_ in py_attr_ids]
         except KeyError as msg:
-            keys = [k for k in IDS.keys() if not k.startswith("FLAG")]
+            keys = list(IDS.keys())
             raise KeyError(Errors.E983.format(dict="IDS", key=msg, keys=keys)) from None
         # Make an array from the attributes --- otherwise our inner loop is
         # Python dict iteration.
-        cdef np.ndarray attr_ids = numpy.asarray(py_attr_ids, dtype="i")
-        output = numpy.ndarray(shape=(self.length, len(attr_ids)), dtype=numpy.uint64)
+        cdef Pool mem = Pool()
+        cdef int n_attrs = len(py_attr_ids)
+        cdef attr_id_t* c_attr_ids
+        if n_attrs > 0:
+            c_attr_ids = <attr_id_t*>mem.alloc(n_attrs, sizeof(attr_id_t))
+            for i, attr_id in enumerate(py_attr_ids):
+                c_attr_ids[i] = attr_id
+        output = numpy.ndarray(shape=(self.length, n_attrs), dtype=numpy.uint64)
         c_output = <attr_t*>output.data
-        c_attr_ids = <attr_id_t*>attr_ids.data
         cdef TokenC* token
-        cdef int nr_attr = attr_ids.shape[0]
         for i in range(self.length):
             token = &self.c[i]
-            for j in range(nr_attr):
-                c_output[i*nr_attr + j] = get_token_attr(token, c_attr_ids[j])
+            for j in range(n_attrs):
+                c_output[i*n_attrs + j] = get_token_attr(token, c_attr_ids[j])
         # Handle 1d case
-        return output if len(attr_ids) >= 2 else output.reshape((self.length,))
+        return output if n_attrs >= 2 else output.reshape((self.length,))
 
     def count_by(self, attr_id_t attr_id, exclude=None, object counts=None):
         """Count the frequencies of a given attribute. Produces a dict of
@@ -1168,13 +1178,22 @@ cdef class Doc:
 
             if "user_data" not in exclude:
                 for key, value in doc.user_data.items():
-                    if isinstance(key, tuple) and len(key) == 4 and key[0] == "._.":
-                        data_type, name, start, end = key
+                    if isinstance(key, tuple) and len(key) >= 4 and key[0] == "._.":
+                        data_type = key[0]
+                        name = key[1]
+                        start = key[2]
+                        end = key[3]
                         if start is not None or end is not None:
                             start += char_offset
                             if end is not None:
                                 end += char_offset
-                            concat_user_data[(data_type, name, start, end)] = copy.copy(value)
+                                _label = key[4]
+                                _kb_id = key[5]
+                                _span_id = key[6]
+                                concat_user_data[(data_type, name, start, end, _label, _kb_id, _span_id)] = copy.copy(value)
+                            else:
+                                concat_user_data[(data_type, name, start, end)] = copy.copy(value)
+
                         else:
                             warnings.warn(Warnings.W101.format(name=name))
                     else:
@@ -1260,7 +1279,6 @@ cdef class Doc:
         other.tensor = copy.deepcopy(self.tensor)
         other.cats = copy.deepcopy(self.cats)
         other.user_data = copy.deepcopy(self.user_data)
-        other.sentiment = self.sentiment
         other.has_unknown_spaces = self.has_unknown_spaces
         other.user_hooks = dict(self.user_hooks)
         other.user_token_hooks = dict(self.user_token_hooks)
@@ -1357,7 +1375,6 @@ cdef class Doc:
             "text": lambda: self.text,
             "array_head": lambda: array_head,
             "array_body": lambda: self.to_array(array_head),
-            "sentiment": lambda: self.sentiment,
             "tensor": lambda: self.tensor,
             "cats": lambda: self.cats,
             "spans": lambda: self.spans.to_bytes(),
@@ -1395,8 +1412,6 @@ cdef class Doc:
             for key, value in zip(user_data_keys, user_data_values):
                 self.user_data[key] = value
         cdef int i, start, end, has_space
-        if "sentiment" not in exclude and "sentiment" in msg:
-            self.sentiment = msg["sentiment"]
         if "tensor" not in exclude and "tensor" in msg:
             self.tensor = msg["tensor"]
         if "cats" not in exclude and "cats" in msg:
@@ -1623,7 +1638,11 @@ cdef class Doc:
                 Span.set_extension(span_attr)
             for span_data in doc_json["underscore_span"][span_attr]:
                 value = span_data["value"]
-                self.char_span(span_data["start"], span_data["end"])._.set(span_attr, value)
+                span = self.char_span(span_data["start"], span_data["end"])
+                span.label = span_data["label"]
+                span.kb_id = span_data["kb_id"]
+                span.id = span_data["id"]
+                span._.set(span_attr, value)
         return self
 
     def to_json(self, underscore=None):
@@ -1701,13 +1720,16 @@ cdef class Doc:
                                 if attr not in data["underscore_token"]:
                                     data["underscore_token"][attr] = []
                                 data["underscore_token"][attr].append({"start": start, "value": value})
-                            # Span attribute
-                            elif start is not None and end is not None:
+                            # Else span attribute
+                            elif end is not None:
+                                _label = data_key[4]
+                                _kb_id = data_key[5]
+                                _span_id = data_key[6]
                                 if "underscore_span" not in data:
                                     data["underscore_span"] = {}
                                 if attr not in data["underscore_span"]:
                                     data["underscore_span"][attr] = []
-                                data["underscore_span"][attr].append({"start": start, "end": end, "value": value})
+                                data["underscore_span"][attr].append({"start": start, "end": end, "value": value, "label": _label, "kb_id": _kb_id, "id":_span_id})
 
             for attr in underscore:
                 if attr not in user_keys:

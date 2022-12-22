@@ -22,6 +22,7 @@ from .. import parts_of_speech
 from ..errors import Errors, Warnings
 from ..attrs import IOB_STRINGS
 from .underscore import Underscore, get_ext_args
+from cython.operator cimport dereference as deref
 
 
 cdef class Token:
@@ -231,7 +232,7 @@ cdef class Token:
             # Check that the morph has the same vocab
             if self.vocab != morph.vocab:
                 raise ValueError(Errors.E1013)
-            self.c.morph = morph.c.key
+            self.c.morph = deref(morph.c).key
 
     def set_morph(self, features):
         cdef hash_t key
@@ -281,14 +282,6 @@ cdef class Token:
     def prob(self):
         """RETURNS (float): Smoothed log probability estimate of token type."""
         return self.vocab[self.c.lex.orth].prob
-
-    @property
-    def sentiment(self):
-        """RETURNS (float): A scalar value indicating the positivity or
-            negativity of the token."""
-        if "sentiment" in self.doc.user_token_hooks:
-            return self.doc.user_token_hooks["sentiment"](self)
-        return self.vocab[self.c.lex.orth].sentiment
 
     @property
     def lang(self):

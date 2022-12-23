@@ -328,7 +328,7 @@ def _distill_loop(
         if before_update:
             before_update_args = {"step": step, "epoch": epoch}
             before_update(student, before_update_args)
-        dropout = next(dropouts)  # type: ignore
+        dropout = dropouts(optimizer.step) 
         for subbatch in subdivide_batch(batch, accumulate_gradient):
             student.distill(
                 teacher,
@@ -356,6 +356,7 @@ def _distill_loop(
                     score, other_scores = evaluate()
             else:
                 score, other_scores = evaluate()
+            optimizer.last_score = score
             results.append((score, step))
             is_best_checkpoint = score == max(results)[0]
         else:

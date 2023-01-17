@@ -396,6 +396,12 @@ def test_overfitting_IO(pipe_name):
     assert_equal(batch_deps_1, no_batch_deps)
 
 
+def test_is_distillable():
+    nlp = English()
+    parser = nlp.add_pipe("parser")
+    assert parser.is_distillable
+
+
 def test_distill():
     teacher = English()
     teacher_parser = teacher.add_pipe("parser")
@@ -418,11 +424,15 @@ def test_distill():
         get_examples=lambda: train_examples, labels=teacher_parser.label_data
     )
 
-    docs = [eg.predicted for eg in train_examples]
+    distill_examples = [
+        Example.from_dict(teacher.make_doc(t[0]), {}) for t in TRAIN_DATA
+    ]
 
     for i in range(200):
         losses = {}
-        student_parser.distill(teacher_parser, docs, docs, sgd=optimizer, losses=losses)
+        student_parser.distill(
+            teacher_parser, distill_examples, sgd=optimizer, losses=losses
+        )
     assert losses["parser"] < 0.0001
 
     test_text = "I like securities."

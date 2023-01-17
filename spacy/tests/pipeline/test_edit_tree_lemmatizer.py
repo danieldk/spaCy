@@ -195,6 +195,12 @@ def test_overfitting_IO():
     assert doc4[3].lemma_ == "egg"
 
 
+def test_is_distillable():
+    nlp = English()
+    lemmatizer = nlp.add_pipe("trainable_lemmatizer")
+    assert lemmatizer.is_distillable
+
+
 def test_distill():
     teacher = English()
     teacher_lemmatizer = teacher.add_pipe("trainable_lemmatizer")
@@ -217,12 +223,14 @@ def test_distill():
         get_examples=lambda: train_examples, labels=teacher_lemmatizer.label_data
     )
 
-    docs = [eg.predicted for eg in train_examples]
+    distill_examples = [
+        Example.from_dict(teacher.make_doc(t[0]), {}) for t in TRAIN_DATA
+    ]
 
     for i in range(50):
         losses = {}
         student_lemmatizer.distill(
-            teacher_lemmatizer, docs, docs, sgd=optimizer, losses=losses
+            teacher_lemmatizer, distill_examples, sgd=optimizer, losses=losses
         )
     assert losses["trainable_lemmatizer"] < 0.00001
 

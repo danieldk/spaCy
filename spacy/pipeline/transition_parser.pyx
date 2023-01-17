@@ -30,6 +30,7 @@ from ._parser_internals cimport _beam_utils
 from ._parser_internals import _beam_utils
 
 from ..training import validate_examples, validate_get_examples
+from ..training import validate_distillation_examples
 from ..errors import Errors, Warnings
 from .. import util
 
@@ -210,8 +211,7 @@ cdef class Parser(TrainablePipe):
 
     def distill(self,
                teacher_pipe: Optional[TrainablePipe],
-               teacher_docs: Iterable[Doc],
-               student_docs: Iterable[Doc],
+               examples: Iterable["Example"],
                *,
                drop: float=0.0,
                sgd: Optional[Optimizer]=None,
@@ -222,16 +222,17 @@ cdef class Parser(TrainablePipe):
 
         teacher_pipe (Optional[TrainablePipe]): The teacher pipe to learn
             from.
-        teacher_docs (Iterable[Doc]): Documents passed through teacher pipes.
-        student_docs (Iterable[Doc]): Documents passed through student pipes.
-            Must contain the same tokens as `teacher_docs` but may have
-            different annotations.
+        examples (Iterable[Example]): Distillation examples. The reference
+            and predicted docs must have the same number of tokens and the
+            same orthography.
         drop (float): dropout rate.
         sgd (Optional[Optimizer]): An optimizer. Will be created via
             create_optimizer if not set.
         losses (Optional[Dict[str, float]]): Optional record of loss during
             distillation.
         RETURNS: The updated losses dictionary.
+        
+        DOCS: https://spacy.io/api/dependencyparser#distill
         """
         if teacher_pipe is None:
             raise ValueError(Errors.E4002.format(name=self.name))
@@ -239,14 +240,13 @@ cdef class Parser(TrainablePipe):
             losses = {}
         losses.setdefault(self.name, 0.0)
 
-        if not any(len(doc) for doc in teacher_docs):
-            return losses
-        if not any(len(doc) for doc in student_docs):
-            return losses
+        validate_distillation_examples(examples, "TransitionParser.distill")
 
         set_dropout_rate(self.model, drop)
 
-        teacher_step_model = teacher_pipe.model.predict(teacher_docs)
+        student_docs = [eg.predicted for eg in examples]
+
+        teacher_step_model = teacher_pipe.model.predict([eg.reference for eg in examples])
         student_step_model, backprop_tok2vec = self.model.begin_update(student_docs)
 
         # Add softmax activation, so that we can compute student losses
@@ -314,6 +314,8 @@ cdef class Parser(TrainablePipe):
         teacher_scores: Scores representing the teacher model's predictions.
         student_scores: Scores representing the student model's predictions.
 
+        RETURNS (Tuple[float, float]): The loss and the gradient.
+        
         DOCS: https://spacy.io/api/dependencyparser#get_teacher_student_loss
         """
         loss_func = LegacySequenceCategoricalCrossentropy(normalize=False)

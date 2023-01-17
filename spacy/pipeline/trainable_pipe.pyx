@@ -6,7 +6,7 @@ import warnings
 
 from ..tokens.doc cimport Doc
 
-from ..training import validate_examples
+from ..training import validate_examples, validate_distillation_examples
 from ..errors import Errors, Warnings
 from .pipe import Pipe, deserialize_config
 from .. import util
@@ -59,8 +59,7 @@ cdef class TrainablePipe(Pipe):
 
     def distill(self,
                teacher_pipe: Optional["TrainablePipe"],
-               teacher_docs: Iterable["Doc"],
-               student_docs: Iterable["Doc"],
+               examples: Iterable["Example"],
                *,
                drop: float=0.0,
                sgd: Optional[Optimizer]=None,
@@ -71,16 +70,17 @@ cdef class TrainablePipe(Pipe):
 
         teacher_pipe (Optional[TrainablePipe]): The teacher pipe to learn
             from.
-        teacher_docs (Iterable[Doc]): Documents passed through teacher pipes.
-        student_docs (Iterable[Doc]): Documents passed through student pipes.
-            Must contain the same tokens as `teacher_docs` but may have
-            different annotations.
+        examples (Iterable[Example]): Distillation examples. The reference
+            and predicted docs must have the same number of tokens and the
+            same orthography.
         drop (float): dropout rate.
         sgd (Optional[Optimizer]): An optimizer. Will be created via
             create_optimizer if not set.
         losses (Optional[Dict[str, float]]): Optional record of loss during
             distillation.
         RETURNS: The updated losses dictionary.
+        
+        DOCS: https://spacy.io/api/pipe#distill
         """
         # By default we require a teacher pipe, but there are downstream
         # implementations that don't require a pipe.
@@ -89,16 +89,13 @@ cdef class TrainablePipe(Pipe):
         if losses is None:
             losses = {}
         losses.setdefault(self.name, 0.0)
-        if not any(len(doc) for doc in teacher_docs):
-            return losses
-        if not any(len(doc) for doc in student_docs):
-            return losses
+        validate_distillation_examples(examples, "TrainablePipe.distill")
         set_dropout_rate(self.model, drop)
         for node in teacher_pipe.model.walk():
             if node.name == "softmax":
                 node.attrs["softmax_normalize"] = True
-        teacher_scores = teacher_pipe.model.predict(teacher_docs)
-        student_scores, bp_student_scores = self.model.begin_update(student_docs)
+        teacher_scores = teacher_pipe.model.predict([eg.reference for eg in examples])
+        student_scores, bp_student_scores = self.model.begin_update([eg.predicted for eg in examples])
         loss, d_scores = self.get_teacher_student_loss(teacher_scores, student_scores)
         bp_student_scores(d_scores)
         if sgd is not None:
@@ -226,6 +223,8 @@ cdef class TrainablePipe(Pipe):
         teacher_scores: Scores representing the teacher model's predictions.
         student_scores: Scores representing the student model's predictions.
 
+        RETURNS (Tuple[float, float]): The loss and the gradient.
+        
         DOCS: https://spacy.io/api/pipe#get_teacher_student_loss
         """
         raise NotImplementedError(Errors.E931.format(parent="TrainablePipe", method="get_teacher_student_loss", name=self.name))
@@ -265,6 +264,14 @@ cdef class TrainablePipe(Pipe):
         DOCS: https://spacy.io/api/pipe#add_label
         """
         raise NotImplementedError(Errors.E931.format(parent="Pipe", method="add_label", name=self.name))
+
+    @property
+    def is_distillable(self) -> bool:
+        # Normally a pipe overrides `get_teacher_student_loss` to implement
+        # distillation. In more exceptional cases, a pipe can provide its
+        # own `distill` implementation. If neither of these methods is
+        # overridden, the pipe does not implement distillation.
+        return not (self.__class__.distill is TrainablePipe.distill and self.__class__.get_teacher_student_loss is TrainablePipe.get_teacher_student_loss)
 
     @property
     def is_trainable(self) -> bool:

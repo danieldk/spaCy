@@ -95,10 +95,10 @@ def distill(
 def link_rehearsal_models(teacher: "Language", student: "Language"):
     student_config = student.config.interpolate()
     D = util.registry.resolve(student_config["distill"], schema=ConfigSchemaDistill)
-    pipe_map = D["pipe_map"]
+    student_to_teacher = D["student_to_teacher"]
     teacher_pipes = dict(teacher.pipeline)
     for name, pipe in student.pipeline:
-        teacher_pipe_name = pipe_map[name] if name in pipe_map else name
+        teacher_pipe_name = student_to_teacher[name] if name in student_to_teacher else name
         teacher_pipe = teacher_pipes[teacher_pipe_name]
 
         if not (isinstance(pipe, TrainablePipe) and hasattr(pipe, "_rehearsal_model")):

@@ -124,11 +124,11 @@ def init_nlp_distill(
     # Resolve all training-relevant sections using the filled nlp config
     T = registry.resolve(config["training"], schema=ConfigSchemaTraining)
     D = registry.resolve(config["distill"], schema=ConfigSchemaDistill)
-    dot_names = [D["distill_corpus"], T["dev_corpus"]]
-    if not isinstance(D["distill_corpus"], str):
+    dot_names = [D["corpus"], T["dev_corpus"]]
+    if not isinstance(D["corpus"], str):
         raise ConfigValidationError(
             desc=Errors.E897.format(
-                field="distill.distill_corpus", type=type(D["distill_corpus"])
+                field="distill.corpus", type=type(D["corpus"])
             )
         )
     if not isinstance(T["dev_corpus"], str):
@@ -152,11 +152,11 @@ def init_nlp_distill(
     nlp._link_components()
 
     # Get teacher labels to initialize student with.
-    pipe_map = D["pipe_map"]
+    student_to_teacher = D["student_to_teacher"]
     teacher_pipes = dict(teacher.pipeline)
     labels = {}
     for name, pipe in nlp.pipeline:
-        teacher_pipe_name = pipe_map[name] if name in pipe_map else name
+        teacher_pipe_name = student_to_teacher[name] if name in student_to_teacher else name
 
         # TODO: warn if we don't have a corresponding teacher pipe?
         teacher_pipe = teacher_pipes.get(teacher_pipe_name, None)

@@ -1,4 +1,4 @@
-from typing import Iterator, Optional, Any, Dict, Callable, Iterable
+from typing import Iterator, Optional, Any, Dict, Callable, Iterable, Literal
 from typing import Union, Tuple, List, Set, Pattern, Sequence
 from typing import NoReturn, TYPE_CHECKING, TypeVar, cast, overload
 
@@ -22,7 +22,7 @@ from . import ty
 from .tokens.underscore import Underscore
 from .vocab import Vocab, create_vocab
 from .pipe_analysis import validate_attrs, analyze_pipes, print_pipe_analysis
-from .training import Example, validate_examples
+from .training import Example, validate_examples, validate_distillation_examples
 from .training.initialize import init_vocab, init_tok2vec
 from .scorer import Scorer
 from .util import registry, SimpleFrozenList, _pipe, raise_error, _DEFAULT_EMPTY_PIPES
@@ -40,7 +40,6 @@ from .git_info import GIT_VERSION
 from . import util
 from . import about
 from .lookups import load_lookups
-from .compat import Literal
 
 
 PipeCallable = Callable[[Doc], Doc]
@@ -49,6 +48,9 @@ PipeCallable = Callable[[Doc], Doc]
 # This is the base config will all settings (training etc.)
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "default_config.cfg"
 DEFAULT_CONFIG = util.load_config(DEFAULT_CONFIG_PATH)
+# This is the base config for the [distillation] block and currently not included
+# in the main config and only added via the 'init fill-config' command
+DEFAULT_CONFIG_DISTILL_PATH = Path(__file__).parent / "default_config_distillation.cfg"
 # This is the base config for the [pretraining] block and currently not included
 # in the main config and only added via the 'init fill-config' command
 DEFAULT_CONFIG_PRETRAIN_PATH = Path(__file__).parent / "default_config_pretraining.cfg"
@@ -1021,8 +1023,7 @@ class Language:
     def distill(
         self,
         teacher: "Language",
-        docs: Iterable[Doc],
-        _: Optional[Any] = None,
+        examples: Iterable[Example],
         *,
         drop: float = 0.0,
         sgd: Optional[Optimizer] = None,
@@ -1030,79 +1031,89 @@ class Language:
         component_cfg: Optional[Dict[str, Dict[str, Any]]] = None,
         exclude: Iterable[str] = SimpleFrozenList(),
         annotates: Iterable[str] = SimpleFrozenList(),
-        pipe_map: Dict[str, str],
+        student_to_teacher: Optional[Dict[str, str]] = None,
     ):
-        """Update the models in the pipeline.
-        examples (Iterable[Example]): A batch of examples
-        _: Should not be set - serves to catch backwards-incompatible scripts.
+        """Distill the models in a student pipeline from a teacher pipeline.
+        teacher (Language): Teacher to distill from.
+        examples (Iterable[Example]): Distillation examples. The reference
+            (teacher) and predicted (student) docs must have the same number of
+            tokens and the same orthography.
         drop (float): The dropout rate.
-        sgd (Optimizer): An optimizer.
-        losses (Dict[str, float]): Dictionary to update with the loss, keyed by
-            component.
-        component_cfg (Dict[str, Dict]): Config parameters for specific pipeline
-            components, keyed by component name.
+        sgd (Optional[Optimizer]): An optimizer.
+        losses (Optional(Dict[str, float])): Dictionary to update with the loss,
+            keyed by component.
+        component_cfg (Optional[Dict[str, Dict[str, Any]]]): Config parameters
+            for specific pipeline components, keyed by component name.
         exclude (Iterable[str]): Names of components that shouldn't be updated.
         annotates (Iterable[str]): Names of components that should set
             annotations on the predicted examples after updating.
+        student_to_teacher (Optional[Dict[str, str]]): Map student pipe name to
+            teacher pipe name, only needed for pipes where the student pipe
+            name does not match the teacher pipe name.
         RETURNS (Dict[str, float]): The updated losses dictionary
-        DOCS: https://spacy.io/api/language#update
+
+        DOCS: https://spacy.io/api/language#distill
         """
-        if _ is not None:
-            raise ValueError(Errors.E989)
+        if student_to_teacher is None:
+            student_to_teacher = {}
         if losses is None:
             losses = {}
-        if len(docs) == 0:
+        if isinstance(examples, list) and len(examples) == 0:
             return losses
-        student_docs = docs
-        teacher_docs = [doc.copy() for doc in docs]
+
+        validate_distillation_examples(examples, "Language.distill")
+        examples = _copy_examples(examples)
+
         if sgd is None:
             if self._optimizer is None:
                 self._optimizer = self.create_optimizer()
             sgd = self._optimizer
+
         if component_cfg is None:
             component_cfg = {}
         pipe_kwargs = {}
-        for name, student_proc in self.pipeline:
-            component_cfg.setdefault(name, {})
-            pipe_kwargs[name] = deepcopy(component_cfg[name])
-            component_cfg[name].setdefault("drop", drop)
-            pipe_kwargs[name].setdefault("batch_size", self.batch_size)
+        for student_name, student_proc in self.pipeline:
+            component_cfg.setdefault(student_name, {})
+            pipe_kwargs[student_name] = deepcopy(component_cfg[student_name])
+            component_cfg[student_name].setdefault("drop", drop)
+            pipe_kwargs[student_name].setdefault("batch_size", self.batch_size)
+
         teacher_pipes = dict(teacher.pipeline)
-        for name, student_proc in self.pipeline:
-            if name not in exclude and hasattr(student_proc, "distill"):
-                teacher_pipe_name = pipe_map[name] if name in pipe_map else name
-                teacher_pipe = teacher_pipes.get(teacher_pipe_name, None)
+        for student_name, student_proc in self.pipeline:
+            if student_name in annotates:
+                for doc, eg in zip(
+                    _pipe(
+                        (eg.predicted for eg in examples),
+                        proc=student_proc,
+                        name=student_name,
+                        default_error_handler=self.default_error_handler,
+                        kwargs=pipe_kwargs[student_name],
+                    ),
+                    examples,
+                ):
+                    eg.predicted = doc
+
+            if (
+                student_name not in exclude
+                and isinstance(student_proc, ty.DistillableComponent)
+                and student_proc.is_distillable
+            ):
+                # A missing teacher pipe is not an error, some student pipes
+                # do not need a teacher, such as tok2vec layer losses.
+                teacher_name = (
+                    student_to_teacher[student_name]
+                    if student_name in student_to_teacher
+                    else student_name
+                )
+                teacher_pipe = teacher_pipes.get(teacher_name, None)
                 student_proc.distill(
                     teacher_pipe,
-                    teacher_docs,
-                    student_docs,
-                    sgd=None,
+                    examples,
+                    sgd=sgd,
                     losses=losses,
-                    **component_cfg[name],
+                    **component_cfg[student_name],
                 )
-            if sgd not in (None, False):
-                if (
-                    name not in exclude
-                    and hasattr(student_proc, "is_trainable")
-                    and student_proc.is_trainable
-                    and student_proc.model not in (True, False, None)
-                ):
-                    student_proc.finish_update(sgd)
-            if name in annotates:
-                for proc, docs in zip(
-                    [teacher_pipe, student_proc], [teacher_docs, student_docs]
-                ):
-                    for doc, eg in zip(
-                        _pipe(
-                            (eg.predicted for eg in docs),
-                            proc=proc,
-                            name=name,
-                            default_error_handler=self.default_error_handler,
-                            kwargs=pipe_kwargs[name],
-                        ),
-                        docs,
-                    ):
-                        eg.predicted = doc
+
         return losses
 
     def disable_pipes(self, *names) -> "DisabledPipes":
@@ -1330,16 +1341,16 @@ class Language:
         self,
         get_examples: Optional[Callable[[], Iterable[Example]]] = None,
         *,
-        labels: Dict[str, Any] = None,
+        labels: Optional[Dict[str, Any]] = None,
         sgd: Optional[Optimizer] = None,
     ) -> Optimizer:
         """Initialize the pipe for training, using data examples if available.
 
         get_examples (Callable[[], Iterable[Example]]): Optional function that
             returns gold-standard Example objects.
-        labels (Dict[str, Any]): labels to pass to pipe initialization, using
-            the names of the pipes as keys. Overrides labels that are in the
-            model configuration.
+        labels (Optional[Dict[str, Any]]): Labels to pass to pipe initialization,
+            using the names of the pipes as keys. Overrides labels that are in
+            the model configuration.
         sgd (Optional[Optimizer]): An optimizer to use for updates. If not
             provided, will be created using the .create_optimizer() method.
         RETURNS (thinc.api.Optimizer): The optimizer.

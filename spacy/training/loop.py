@@ -55,7 +55,7 @@ def distill(
         set_gpu_allocator(allocator)
     T = registry.resolve(config["training"], schema=ConfigSchemaTraining)
     D = registry.resolve(config["distill"], schema=ConfigSchemaDistill)
-    dot_names = [D["distill_corpus"], T["dev_corpus"]]
+    dot_names = [D["corpus"], T["dev_corpus"]]
     distill_corpus, dev_corpus = resolve_dot_names(config, dot_names)
     optimizer = D["optimizer"]
     score_weights = T["score_weights"]
@@ -63,7 +63,7 @@ def distill(
     train_logger = T["logger"]
     before_to_disk = create_before_to_disk_callback(T["before_to_disk"])
     before_update = T["before_update"]
-    pipe_map = D["pipe_map"]
+    student_to_teacher = D["student_to_teacher"]
 
     # Helper function to save checkpoints. This is a closure for convenience,
     # to avoid passing in all the args all the time.
@@ -95,7 +95,7 @@ def distill(
         exclude=frozen_components,
         annotating_components=annotating_components,
         before_update=before_update,
-        pipe_map=pipe_map,
+        student_to_teacher=student_to_teacher,
     )
     clean_output_dir(output_path)
     stdout.write(msg.info(f"Pipeline: {student.pipe_names}") + "\n")
@@ -276,7 +276,7 @@ def _distill_loop(
     exclude: List[str],
     annotating_components: List[str],
     before_update: Optional[Callable[["Language", Dict[str, Any]], None]],
-    pipe_map: Dict[str, str],
+    student_to_teacher: Dict[str, str],
 ):
     """Train until an evaluation stops improving. Works as a generator,
     with each iteration yielding a tuple `(batch, info, is_best_checkpoint)`,
@@ -335,10 +335,10 @@ def _distill_loop(
                 subbatch,
                 drop=dropout,
                 losses=losses,
-                sgd=False,  # type: ignore[arg-type]
+                sgd=None,
                 exclude=exclude,
                 annotates=annotating_components,
-                pipe_map=pipe_map,
+                student_to_teacher=student_to_teacher,
             )
         # TODO: refactor this so we don't have to run it separately in here
         for name, proc in student.pipeline:
@@ -556,7 +556,7 @@ def create_evaluation_callback(
 
 def create_distill_batches(
     nlp: "Language",
-    corpus: Callable[["Language"], Iterable[Doc]],
+    corpus: Callable[["Language"], Iterable[Example]],
     batcher: Callable[[Iterable[Example]], Iterable[Example]],
     max_epochs: int,
 ):

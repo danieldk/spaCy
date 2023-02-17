@@ -212,6 +212,7 @@ def my_parser():
         extra_state_tokens=True,
         hidden_width=65,
         maxout_pieces=5,
+        use_upper=True,
     )
     return parser
 
@@ -326,12 +327,13 @@ def test_serialize_custom_nlp():
         nlp2 = spacy.load(d)
         model = nlp2.get_pipe("parser").model
         assert model.get_ref("tok2vec") is not None
-        assert model.has_param("hidden_W")
-        assert model.has_param("hidden_b")
-        output = model.get_ref("output")
-        assert output is not None
-        assert output.has_param("W")
-        assert output.has_param("b")
+        lower = model.get_ref("lower")
+        assert lower.has_param("W")
+        assert lower.has_param("b")
+        upper = model.get_ref("upper")
+        assert upper is not None
+        assert upper.has_param("W")
+        assert upper.has_param("b")
 
 
 @pytest.mark.parametrize("parser_config_string", [parser_config_string_upper])
@@ -348,12 +350,13 @@ def test_serialize_parser(parser_config_string):
         nlp2 = spacy.load(d)
         model = nlp2.get_pipe("parser").model
         assert model.get_ref("tok2vec") is not None
-        assert model.has_param("hidden_W")
-        assert model.has_param("hidden_b")
-        output = model.get_ref("output")
-        assert output is not None
-        assert output.has_param("b")
-        assert output.has_param("W")
+        lower = model.get_ref("lower")
+        assert lower.has_param("W")
+        assert lower.has_param("b")
+        upper = model.get_ref("upper")
+        assert upper is not None
+        assert upper.has_param("b")
+        assert upper.has_param("W")
 
 
 def test_config_nlp_roundtrip():

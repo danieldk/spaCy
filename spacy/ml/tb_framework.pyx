@@ -1,5 +1,6 @@
 # cython: infer_types=True, cdivision=True, boundscheck=False
 from typing import List, Tuple, Any, Optional, TypeVar, cast
+from cython cimport NULL
 from libc.string cimport memset, memcpy
 from libc.stdlib cimport calloc, free, realloc
 from libcpp.vector cimport vector
@@ -35,6 +36,7 @@ def TransitionModel(
     state_tokens: int,
     hidden_width: int,
     maxout_pieces: int,
+    use_upper: bool,
     nO: Optional[int] = None,
     unseen_classes=set(),
 ) -> Model[Tuple[List[Doc], TransitionSystem], List[Tuple[State, List[Floats2d]]]]:
@@ -51,18 +53,28 @@ def TransitionModel(
     # which has a different key in the optimizer. Once the optimizer
     # supports parameter resizing, we can replace the layers by
     # parameters in this model.
-    lower = PrecomputableAffine(nF=state_tokens, nP=maxout_pieces, nO=hidden_width)
-    upper = Linear(nO=None, nI=hidden_width, init_W=zero_init)
+    if use_upper:
+        lower = PrecomputableAffine(nF=state_tokens, nP=maxout_pieces, nO=hidden_width)
+        upper = Linear(nO=None, nI=hidden_width, init_W=zero_init)
+        layers = [tok2vec_projected, lower, upper]
+        output = upper
+
+    else:
+        lower = PrecomputableAffine(nF=state_tokens, nP=maxout_pieces, nO=None)
+        upper = None
+        layers = [tok2vec_projected, lower]
+        output = lower
 
     return Model(
         name="parser_model",
         forward=forward,
         init=init,
-        layers=[tok2vec_projected, lower, upper],
+        layers=layers,
         refs={
             "tok2vec": tok2vec_projected,
             "lower": lower,
             "upper": upper,
+            "output": output,
         },
         params={
             "hidden_pad": None,  # Floats1d padding for the hidden layer
@@ -85,28 +97,55 @@ def TransitionModel(
 
 def resize_output(model: Model, new_nO: int) -> Model:
     old_nO = model.maybe_get_dim("nO")
-    upper = model.get_ref("upper")
+    output = model.get_ref("output")
     if old_nO is None:
         model.set_dim("nO", new_nO)
-        upper.set_dim("nO", new_nO)
-        upper.initialize()
+        output.set_dim("nO", new_nO)
+        # We have to guard initialization here, because labels
+        # can be added before the model is properly initialized.
+        if output.has_dim("nI"):
+            output.initialize()
         return model
     elif new_nO <= old_nO:
         return model
-    elif upper.has_param("W"):
-        nH = model.get_dim("nH")
-        new_upper = Linear(nO=new_nO, nI=nH, init_W=zero_init)
-        new_upper.initialize()
-        new_W = new_upper.get_param("W")
-        new_b = new_upper.get_param("b")
-        old_W = upper.get_param("W")
-        old_b = upper.get_param("b")
-        new_W[:old_nO] = old_W  # type: ignore
-        new_b[:old_nO] = old_b  # type: ignore
+    elif not output.has_param("W"):
+        output._dims["nO"] = new_nO
+        if output.has_dim("nI"):
+            output.initialize()
+    else:
+        # This is annoying, but replacing the output layer cannot
+        # be done in a generic way. So, we'll had to replace the
+        # output layer in a different way depending on whether it
+        # is the lower or uppen layer.
+        old_W = output.get_param("W")
+        old_b = output.get_param("b")
+        if output is model.get_ref("lower"):
+            nP=output.get_dim("nP"),
+            new_output = PrecomputableAffine(
+                nF=output.get_dim("nF"),
+                nP=nP,
+                nI=output.get_dim("nI"),
+                nO=new_nO
+            )
+            new_output.initialize()
+            new_W = new_output.get_param("W")
+            new_b = new_output.get_param("b")
+            new_W[:old_nO*nP] = old_W  # type: ignore
+            new_b[:old_nO*nP] = old_b  # type: ignore
+        else:
+            new_output = Linear(nO=new_nO, nI=model.get_dim("nH"), init_W=zero_init)
+            new_output.initialize()
+            new_W = new_output.get_param("W")
+            new_b = new_output.get_param("b")
+            new_W[:old_nO] = old_W  # type: ignore
+            new_b[:old_nO] = old_b  # type: ignore
+
+        assert model.replace_node(output, new_output)
+
         for i in range(old_nO, new_nO):
             model.attrs["unseen_classes"].add(i)
-        model.layers[-1] = new_upper
-        model.set_ref("upper", new_upper)
+
+
     # TODO: Avoid this private intrusion
     model._dims["nO"] = new_nO
     return model
@@ -119,14 +158,13 @@ def init(
 ):
     tok2vec = model.get_ref("tok2vec")
     if X is not None:
-        docs, moves = X
+        docs, _ = X
         tok2vec.initialize(X=docs)
     else:
         tok2vec.initialize()
 
     lower = model.get_ref("lower")
     nI = model.get_dim("nI")
-    nF = model.get_dim("nF")
     lower.set_dim("nI", nI)
     lower.initialize()
 
@@ -284,9 +322,10 @@ def _forward_fallback(
     max_moves: int=0):
     nF = model.get_dim("nF")
     lower = model.get_ref("lower")
-    upper = model.get_ref("upper")
+    upper = model.maybe_get_ref("upper")
     lower_b = lower.get_param("b")
     nH = model.get_dim("nH")
+    nO = model.get_dim("nO")
     nP = model.get_dim("nP")
 
     beam_width = model.attrs["beam_width"]
@@ -314,12 +353,18 @@ def _forward_fallback(
         # to create the state vectors.
         preacts2f = feats[ids, arange].sum(axis=1)  # type: ignore
         preacts2f += lower_b
-        preacts = ops.reshape3f(preacts2f, preacts2f.shape[0], nH, nP)
-        assert preacts.shape[0] == len(batch.get_unfinished_states()), preacts.shape
-        statevecs, which = ops.maxout(preacts)
-        # We don't use output's backprop, since we want to backprop for
-        # all states at once, rather than a single state.
-        scores = upper.predict(statevecs)
+        if upper is None:
+            preacts = ops.reshape3f(preacts2f, preacts2f.shape[0], nO, nP)
+            assert preacts.shape[0] == len(batch.get_unfinished_states()), preacts.shape
+            statevecs, which = ops.maxout(preacts)
+            scores = statevecs
+        else:
+            preacts = ops.reshape3f(preacts2f, preacts2f.shape[0], nH, nP)
+            assert preacts.shape[0] == len(batch.get_unfinished_states()), preacts.shape
+            statevecs, which = ops.maxout(preacts)
+            # We don't use output's backprop, since we want to backprop for
+            # all states at once, rather than a single state.
+            scores = upper.predict(statevecs)
         scores[:, seen_mask] = ops.xp.nanmin(scores)
         # Transition the states, filtering out any that are finished.
         cpu_scores = ops.to_numpy(scores)
@@ -351,17 +396,23 @@ def _forward_fallback(
                 if (d_scores[:, clas] < 0).any():
                     model.attrs["unseen_classes"].remove(clas)
         d_scores *= seen_mask == False
-        # Calculate the gradients for the parameters of the output layer.
-        # The weight gemm is (nS, nO) @ (nS, nH).T
-        upper.inc_grad("b", d_scores.sum(axis=0))
-        upper.inc_grad("W", ops.gemm(d_scores, statevecs, trans1=True))
-        # Now calculate d_statevecs, by backproping through the output linear layer.
-        # This gemm is (nS, nO) @ (nO, nH)
-        upper_W = upper.get_param("W")
-        d_statevecs = ops.gemm(d_scores, upper_W)
+        if upper is None:
+            d_statevecs = d_scores
+        else:
+            # Calculate the gradients for the parameters of the output layer.
+            # The weight gemm is (nS, nO) @ (nS, nH).T
+            upper.inc_grad("b", d_scores.sum(axis=0))
+            upper.inc_grad("W", ops.gemm(d_scores, statevecs, trans1=True))
+            # Now calculate d_statevecs, by backproping through the output linear layer.
+            # This gemm is (nS, nO) @ (nO, nH)
+            upper_W = upper.get_param("W")
+            d_statevecs = ops.gemm(d_scores, upper_W)
         # Backprop through the maxout activation
         d_preacts = ops.backprop_maxout(d_statevecs, which, nP)
-        d_preacts2f = ops.reshape2f(d_preacts, d_preacts.shape[0], nH * nP)
+        if upper is None:
+            d_preacts2f = ops.reshape2f(d_preacts, d_preacts.shape[0], nO * nP)
+        else:
+            d_preacts2f = ops.reshape2f(d_preacts, d_preacts.shape[0], nH * nP)
         lower.inc_grad("b", d_preacts2f.sum(axis=0))
         # We don't need to backprop the summation, because we pass back the IDs instead
         d_state_features = backprop_feats((d_preacts2f, ids))
@@ -401,7 +452,6 @@ def _forward_precomputable_affine(model, X: Floats2d, is_train: bool):
     W3f = model.ops.reshape3f(W, nO * nP, nF, nI)
     W3f = W3f.transpose((1, 0, 2))
     W2f = model.ops.reshape2f(W3f, nF * nO * nP, nI)
-    print(X.shape, nI)
     assert X.shape == (X.shape[0], nI), X.shape
     Yf_ = model.ops.gemm(X, W2f, trans2=True)
     Yf = model.ops.reshape3f(Yf_, Yf_.shape[0], nF, nO * nP)
@@ -526,17 +576,23 @@ def _lsuv_init(model: Model):
 
 cdef WeightsC _get_c_weights(model, const float* feats, np.ndarray[np.npy_bool, ndim=1] seen_mask) except *:
     lower = model.get_ref("lower")
-    upper = model.get_ref("upper")
     cdef np.ndarray lower_b = lower.get_param("b")
-    cdef np.ndarray upper_W = upper.get_param("W")
-    cdef np.ndarray upper_b = upper.get_param("b")
+    cdef np.ndarray upper_W
+    cdef np.ndarray upper_b
 
     cdef WeightsC weights
     weights.feat_weights = feats
     weights.feat_bias = <const float*>lower_b.data
-    weights.hidden_weights = <const float *> upper_W.data
-    weights.hidden_bias = <const float *> upper_b.data
+    weights.hidden_weights = NULL
+    weights.hidden_bias = NULL
     weights.seen_mask = <const int8_t*> seen_mask.data
+
+    upper = model.maybe_get_ref("upper")
+    if upper is not None:
+        upper_W = upper.get_param("W")
+        upper_b = upper.get_param("b")
+        weights.hidden_weights = <const float *> upper_W.data
+        weights.hidden_bias = <const float *> upper_b.data
 
     return weights
 

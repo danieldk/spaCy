@@ -22,15 +22,13 @@ def transition_parser_v2(
     use_upper: bool,
     nO: Optional[int] = None,
 ) -> Model:
-    if not use_upper:
-        warnings.warn(Warnings.W400)
-
     return build_tb_parser_model(
         tok2vec,
         state_type,
         extra_state_tokens,
         hidden_width,
         maxout_pieces,
+        use_upper,
         nO=nO,
     )
 
@@ -50,6 +48,7 @@ def transition_parser_v3(
         extra_state_tokens,
         hidden_width,
         maxout_pieces,
+        use_upper=True,
         nO=nO,
     )
 
@@ -60,6 +59,7 @@ def build_tb_parser_model(
     extra_state_tokens: bool,
     hidden_width: int,
     maxout_pieces: int,
+    use_upper: bool,
     nO: Optional[int] = None,
 ) -> Model:
     """
@@ -109,6 +109,7 @@ def build_tb_parser_model(
         state_tokens=nr_feature_tokens,
         hidden_width=hidden_width,
         maxout_pieces=maxout_pieces,
+        use_upper=use_upper,
         nO=nO,
         unseen_classes=set(),
     )

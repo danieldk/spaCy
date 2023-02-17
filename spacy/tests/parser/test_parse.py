@@ -403,13 +403,13 @@ def test_incomplete_data(pipe_name):
 
 
 @pytest.mark.parametrize(
-    "pipe_name,max_moves", itertools.product(PARSERS, [0, 1, 5, 100])
+    "pipe_name,use_upper,max_moves", itertools.product(PARSERS, [True, False], [0, 1, 5, 100])
 )
-def test_overfitting_IO(pipe_name, max_moves):
+def test_overfitting_IO(pipe_name, use_upper, max_moves):
     fix_random_seed(0)
     # Simple test to try and quickly overfit the dependency parser (normal or beam)
     nlp = English()
-    parser = nlp.add_pipe(pipe_name)
+    parser = nlp.add_pipe(pipe_name, config={"model": {"use_upper": use_upper}})
     parser.cfg["update_with_oracle_cut_size"] = max_moves
     train_examples = []
     for text, annotations in TRAIN_DATA:

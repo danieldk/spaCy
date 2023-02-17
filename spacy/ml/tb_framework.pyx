@@ -51,7 +51,7 @@ def TransitionModel(
     # which has a different key in the optimizer. Once the optimizer
     # supports parameter resizing, we can replace the layers by
     # parameters in this model.
-    lower = Linear(nO=hidden_width * maxout_pieces)
+    lower = PrecomputableAffine(nF=state_tokens, nP=maxout_pieces, nO=hidden_width)
     upper = Linear(nO=None, nI=hidden_width, init_W=zero_init)
 
     return Model(
@@ -127,7 +127,7 @@ def init(
     lower = model.get_ref("lower")
     nI = model.get_dim("nI")
     nF = model.get_dim("nF")
-    lower.set_dim("nI", nF * nI)
+    lower.set_dim("nI", nI)
     lower.initialize()
 
     inferred_nO = _infer_nO(Y)
@@ -200,10 +200,12 @@ def forward(model, inputs: TransitionModelInputs, is_train: bool):
     hidden_pad = model.get_param("hidden_pad")
     tok2vec = model.get_ref("tok2vec")
 
+    lower = model.get_ref("lower")
+
     states = moves.init_batch(docs) if inputs.states is None else inputs.states
     tokvecs, backprop_tok2vec = tok2vec(docs, is_train)
     tokvecs = model.ops.xp.vstack((tokvecs, hidden_pad))
-    feats, backprop_feats = _forward_precomputable_affine(model, tokvecs, is_train)
+    feats, backprop_feats = lower(tokvecs, is_train)
     seen_mask = _get_seen_mask(model)
 
     if not is_train and beam_width == 1 and isinstance(model.ops, NumpyOps):
@@ -378,28 +380,40 @@ def _get_seen_mask(model: Model) -> numpy.array[bool, 1]:
     return mask
 
 
+def PrecomputableAffine(*, nF=None, nP=None, nI=None, nO=None):
+    model = Model(
+        "precomputable_affine",
+        _forward_precomputable_affine,
+        init=_init_precomputable_affine,
+        dims={"nO": nO, "nI": nI, "nF": nF, "nP": nP},
+        params={"W": None, "b": None, "pad": None},
+    )
+    return model
+
+
 def _forward_precomputable_affine(model, X: Floats2d, is_train: bool):
-    W: Floats2d = model.get_ref("lower").get_param("W")
+    W: Floats2d = model.get_param("W")
     nF = model.get_dim("nF")
-    nH = model.get_dim("nH")
+    nO = model.get_dim("nO")
     nP = model.get_dim("nP")
     nI = model.get_dim("nI")
-    # The weights start out (nH * nP, nF * nI). Transpose and reshape to (nF * nH *nP, nI)
-    W3f = model.ops.reshape3f(W, nH * nP, nF, nI)
+    # The weights start out (nO * nP, nF * nI). Transpose and reshape to (nF * nO *nP, nI)
+    W3f = model.ops.reshape3f(W, nO * nP, nF, nI)
     W3f = W3f.transpose((1, 0, 2))
-    W2f = model.ops.reshape2f(W3f, nF * nH * nP, nI)
+    W2f = model.ops.reshape2f(W3f, nF * nO * nP, nI)
+    print(X.shape, nI)
     assert X.shape == (X.shape[0], nI), X.shape
     Yf_ = model.ops.gemm(X, W2f, trans2=True)
-    Yf = model.ops.reshape3f(Yf_, Yf_.shape[0], nF, nH * nP)
+    Yf = model.ops.reshape3f(Yf_, Yf_.shape[0], nF, nO * nP)
 
     def backward(dY_ids: Tuple[Floats3d, Ints2d]):
         # This backprop is particularly tricky, because we get back a different
         # thing from what we put out. We put out an array of shape:
-        # (nB, nF, nH, nP), and get back:
-        # (nB, nH, nP) and ids (nB, nF)
+        # (nB, nF, nO, nP), and get back:
+        # (nB, nO, nP) and ids (nB, nF)
         # The ids tell us the values of nF, so we would have:
         #
-        # dYf = zeros((nB, nF, nH, nP))
+        # dYf = zeros((nB, nF, nO, nP))
         # for b in range(nB):
         #     for f in range(nF):
         #         dYf[b, ids[b, f]] += dY[b]
@@ -410,10 +424,26 @@ def _forward_precomputable_affine(model, X: Floats2d, is_train: bool):
         dXf = model.ops.gemm(dY, W)
         Xf = X[ids].reshape((ids.shape[0], -1))
         dW = model.ops.gemm(dY, Xf, trans1=True)
-        model.get_ref("lower").inc_grad("W", dW)
+        model.inc_grad("W", dW)
         return model.ops.reshape3f(dXf, dXf.shape[0], nF, nI)
 
     return Yf, backward
+
+
+def _init_precomputable_affine(model, X=None, Y=None):
+    nF = model.get_dim("nF")
+    nO = model.get_dim("nO")
+    nP = model.get_dim("nP")
+    nI = model.get_dim("nI")
+
+    ops = model.ops
+    W = glorot_uniform_init(ops, (nO * nP, nF * nI))
+    b = model.ops.alloc1f(nO * nP)
+
+    model.set_param("W", W)
+    model.set_param("b", b)
+
+    return model
 
 
 def _infer_nO(Y: Optional[Tuple[List[State], List[Floats2d]]]) -> Optional[int]:

@@ -45,27 +45,26 @@ def TransitionModel(
     tok2vec_projected = chain(tok2vec, list2array(), Linear(hidden_width, t2v_width))  # type: ignore
     tok2vec_projected.set_dim("nO", hidden_width)
 
-    # FIXME: we use `output` as a container for the output layer's
-    # weights and biases. Thinc optimizers cannot handle resizing
-    # of parameters. So, when the parser model is resized, we
-    # construct a new `output` layer, which has a different key in
-    # the optimizer. Once the optimizer supports parameter resizing,
-    # we can replace the `output` layer by `output_W` and `output_b`
+    # FIXME: we use linear as a container for weights and biases.
+    # Thinc optimizers cannot handle resizing of parameters. So,
+    # when the parser model is resized, we construct a new Layer,
+    # which has a different key in the optimizer. Once the optimizer
+    # supports parameter resizing, we can replace the layers by
     # parameters in this model.
-    output = Linear(nO=None, nI=hidden_width, init_W=zero_init)
+    lower = Linear(nO=hidden_width * maxout_pieces)
+    upper = Linear(nO=None, nI=hidden_width, init_W=zero_init)
 
     return Model(
         name="parser_model",
         forward=forward,
         init=init,
-        layers=[tok2vec_projected, output],
+        layers=[tok2vec_projected, lower, upper],
         refs={
             "tok2vec": tok2vec_projected,
-            "output": output,
+            "lower": lower,
+            "upper": upper,
         },
         params={
-            "hidden_W": None,  # Floats2d W for the hidden layer
-            "hidden_b": None,  # Floats1d bias for the hidden layer
             "hidden_pad": None,  # Floats1d padding for the hidden layer
         },
         dims={
@@ -86,28 +85,28 @@ def TransitionModel(
 
 def resize_output(model: Model, new_nO: int) -> Model:
     old_nO = model.maybe_get_dim("nO")
-    output = model.get_ref("output")
+    upper = model.get_ref("upper")
     if old_nO is None:
         model.set_dim("nO", new_nO)
-        output.set_dim("nO", new_nO)
-        output.initialize()
+        upper.set_dim("nO", new_nO)
+        upper.initialize()
         return model
     elif new_nO <= old_nO:
         return model
-    elif output.has_param("W"):
+    elif upper.has_param("W"):
         nH = model.get_dim("nH")
-        new_output = Linear(nO=new_nO, nI=nH, init_W=zero_init)
-        new_output.initialize()
-        new_W = new_output.get_param("W")
-        new_b = new_output.get_param("b")
-        old_W = output.get_param("W")
-        old_b = output.get_param("b")
+        new_upper = Linear(nO=new_nO, nI=nH, init_W=zero_init)
+        new_upper.initialize()
+        new_W = new_upper.get_param("W")
+        new_b = new_upper.get_param("b")
+        old_W = upper.get_param("W")
+        old_b = upper.get_param("b")
         new_W[:old_nO] = old_W  # type: ignore
         new_b[:old_nO] = old_b  # type: ignore
         for i in range(old_nO, new_nO):
             model.attrs["unseen_classes"].add(i)
-        model.layers[-1] = new_output
-        model.set_ref("output", new_output)
+        model.layers[-1] = new_upper
+        model.set_ref("upper", new_upper)
     # TODO: Avoid this private intrusion
     model._dims["nO"] = new_nO
     return model
@@ -118,32 +117,28 @@ def init(
     X: Optional[Tuple[List[Doc], TransitionSystem]] = None,
     Y: Optional[Tuple[List[State], List[Floats2d]]] = None,
 ):
+    tok2vec = model.get_ref("tok2vec")
     if X is not None:
         docs, moves = X
-        model.get_ref("tok2vec").initialize(X=docs)
+        tok2vec.initialize(X=docs)
     else:
-        model.get_ref("tok2vec").initialize()
+        tok2vec.initialize()
+
+    lower = model.get_ref("lower")
+    nI = model.get_dim("nI")
+    nF = model.get_dim("nF")
+    lower.set_dim("nI", nF * nI)
+    lower.initialize()
+
     inferred_nO = _infer_nO(Y)
     if inferred_nO is not None:
         current_nO = model.maybe_get_dim("nO")
         if current_nO is None or current_nO != inferred_nO:
             model.attrs["resize_output"](model, inferred_nO)
-    nO = model.get_dim("nO")
-    nP = model.get_dim("nP")
-    nH = model.get_dim("nH")
-    nI = model.get_dim("nI")
-    nF = model.get_dim("nF")
     ops = model.ops
 
-    Wl = ops.alloc2f(nH * nP, nF * nI)
-    bl = ops.alloc1f(nH * nP)
     padl = ops.alloc1f(nI)
-    # Wl = zero_init(ops, Wl.shape)
-    Wl = glorot_uniform_init(ops, Wl.shape)
     padl = uniform_init(ops, padl.shape)  # type: ignore
-    # TODO: Experiment with whether better to initialize output_W
-    model.set_param("hidden_W", Wl)
-    model.set_param("hidden_b", bl)
     model.set_param("hidden_pad", padl)
     # model = _lsuv_init(model)
     return model
@@ -286,8 +281,9 @@ def _forward_fallback(
     actions: Optional[List[Ints1d]]=None,
     max_moves: int=0):
     nF = model.get_dim("nF")
-    output = model.get_ref("output")
-    hidden_b = model.get_param("hidden_b")
+    lower = model.get_ref("lower")
+    upper = model.get_ref("upper")
+    lower_b = lower.get_param("b")
     nH = model.get_dim("nH")
     nP = model.get_dim("nP")
 
@@ -315,13 +311,13 @@ def _forward_fallback(
         # Sum the state features, add the bias and apply the activation (maxout)
         # to create the state vectors.
         preacts2f = feats[ids, arange].sum(axis=1)  # type: ignore
-        preacts2f += hidden_b
+        preacts2f += lower_b
         preacts = ops.reshape3f(preacts2f, preacts2f.shape[0], nH, nP)
         assert preacts.shape[0] == len(batch.get_unfinished_states()), preacts.shape
         statevecs, which = ops.maxout(preacts)
         # We don't use output's backprop, since we want to backprop for
         # all states at once, rather than a single state.
-        scores = output.predict(statevecs)
+        scores = upper.predict(statevecs)
         scores[:, seen_mask] = ops.xp.nanmin(scores)
         # Transition the states, filtering out any that are finished.
         cpu_scores = ops.to_numpy(scores)
@@ -355,16 +351,16 @@ def _forward_fallback(
         d_scores *= seen_mask == False
         # Calculate the gradients for the parameters of the output layer.
         # The weight gemm is (nS, nO) @ (nS, nH).T
-        output.inc_grad("b", d_scores.sum(axis=0))
-        output.inc_grad("W", ops.gemm(d_scores, statevecs, trans1=True))
+        upper.inc_grad("b", d_scores.sum(axis=0))
+        upper.inc_grad("W", ops.gemm(d_scores, statevecs, trans1=True))
         # Now calculate d_statevecs, by backproping through the output linear layer.
         # This gemm is (nS, nO) @ (nO, nH)
-        output_W = output.get_param("W")
-        d_statevecs = ops.gemm(d_scores, output_W)
+        upper_W = upper.get_param("W")
+        d_statevecs = ops.gemm(d_scores, upper_W)
         # Backprop through the maxout activation
         d_preacts = ops.backprop_maxout(d_statevecs, which, nP)
         d_preacts2f = ops.reshape2f(d_preacts, d_preacts.shape[0], nH * nP)
-        model.inc_grad("hidden_b", d_preacts2f.sum(axis=0))
+        lower.inc_grad("b", d_preacts2f.sum(axis=0))
         # We don't need to backprop the summation, because we pass back the IDs instead
         d_state_features = backprop_feats((d_preacts2f, ids))
         d_tokvecs = ops.alloc2f(tokvecs.shape[0], tokvecs.shape[1])
@@ -383,7 +379,7 @@ def _get_seen_mask(model: Model) -> numpy.array[bool, 1]:
 
 
 def _forward_precomputable_affine(model, X: Floats2d, is_train: bool):
-    W: Floats2d = model.get_param("hidden_W")
+    W: Floats2d = model.get_ref("lower").get_param("W")
     nF = model.get_dim("nF")
     nH = model.get_dim("nH")
     nP = model.get_dim("nP")
@@ -414,7 +410,7 @@ def _forward_precomputable_affine(model, X: Floats2d, is_train: bool):
         dXf = model.ops.gemm(dY, W)
         Xf = X[ids].reshape((ids.shape[0], -1))
         dW = model.ops.gemm(dY, Xf, trans1=True)
-        model.inc_grad("hidden_W", dW)
+        model.get_ref("lower").inc_grad("W", dW)
         return model.ops.reshape3f(dXf, dXf.shape[0], nF, nI)
 
     return Yf, backward
@@ -440,7 +436,7 @@ def _lsuv_init(model: Model):
     we set the maxout weights to values that empirically result in
     whitened outputs given whitened inputs.
     """
-    W = model.maybe_get_param("hidden_W")
+    W = model.get_ref("lower").maybe_get_param("W")
     if W is not None and W.any():
         return
 
@@ -481,34 +477,35 @@ def _lsuv_init(model: Model):
     tol_var = 0.01
     tol_mean = 0.01
     t_max = 10
-    W = cast(Floats4d, model.get_param("hidden_W").copy())
-    b = cast(Floats2d, model.get_param("hidden_b").copy())
+    W = cast(Floats4d, model.get_ref("lower").get_param("W").copy())
+    b = cast(Floats2d, model.get_ref("lower").get_param("b").copy())
     for t_i in range(t_max):
         acts1 = predict(ids, tokvecs)
         var = model.ops.xp.var(acts1)
         mean = model.ops.xp.mean(acts1)
         if abs(var - 1.0) >= tol_var:
             W /= model.ops.xp.sqrt(var)
-            model.set_param("hidden_W", W)
+            model.get_ref("lower").set_param("W", W)
         elif abs(mean) >= tol_mean:
             b -= mean
-            model.set_param("hidden_b", b)
+            model.get_ref("lower").set_param("b", b)
         else:
             break
     return model
 
 
 cdef WeightsC _get_c_weights(model, const float* feats, np.ndarray[np.npy_bool, ndim=1] seen_mask) except *:
-    output = model.get_ref("output")
-    cdef np.ndarray hidden_b = model.get_param("hidden_b")
-    cdef np.ndarray output_W = output.get_param("W")
-    cdef np.ndarray output_b = output.get_param("b")
+    lower = model.get_ref("lower")
+    upper = model.get_ref("upper")
+    cdef np.ndarray lower_b = lower.get_param("b")
+    cdef np.ndarray upper_W = upper.get_param("W")
+    cdef np.ndarray upper_b = upper.get_param("b")
 
     cdef WeightsC weights
     weights.feat_weights = feats
-    weights.feat_bias = <const float*>hidden_b.data
-    weights.hidden_weights = <const float *> output_W.data
-    weights.hidden_bias = <const float *> output_b.data
+    weights.feat_bias = <const float*>lower_b.data
+    weights.hidden_weights = <const float *> upper_W.data
+    weights.hidden_bias = <const float *> upper_b.data
     weights.seen_mask = <const int8_t*> seen_mask.data
 
     return weights

@@ -75,6 +75,9 @@ class PoCModel(nn.Module):
         super().__init__()
         self.projection = nn.Linear(in_features=embed_size, out_features=width)
 
+    def initialize(self, X=None, Y=None):
+        pass
+
     def forward(self, docs: List[Doc]):
         keys = [doc.to_array("ORTH") for doc in docs]
         ops = get_array_ops(keys[0])

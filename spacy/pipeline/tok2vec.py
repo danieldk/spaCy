@@ -165,33 +165,20 @@ class Tok2Vec(TrainablePipe):
         validate_examples(examples, "Tok2Vec.update")
         docs = [eg.predicted for eg in examples]
         set_dropout_rate(self.model, drop)
-        tokvecs, bp_tokvecs = self.model.begin_update(docs)
-        d_tokvecs = [self.model.ops.alloc2f(*t2v.shape) for t2v in tokvecs]
-        losses.setdefault(self.name, 0.0)
+        Y = self.model(docs)
+        loss = torch.scalar_tensor(0.0)
+        losses.setdefault(self.name, loss)
 
-        def accumulate_gradient(one_d_tokvecs):
-            """Accumulate tok2vec loss and gradient. This is passed as a callback
-            to all but the last listener. Only the last one does the backprop.
-            """
-            nonlocal d_tokvecs
-            for i in range(len(one_d_tokvecs)):
-                d_tokvecs[i] += one_d_tokvecs[i]
-                losses[self.name] += float((one_d_tokvecs[i] ** 2).sum())
-            return [self.model.ops.alloc2f(*t2v.shape) for t2v in tokvecs]
-
-        def backprop(one_d_tokvecs):
-            """Callback to actually do the backprop. Passed to last listener."""
-            accumulate_gradient(one_d_tokvecs)
-            d_docs = bp_tokvecs(d_tokvecs)
-            if sgd is not None:
-                self.finish_update(sgd)
-            return d_docs
+        def backprop(dY):
+            nonlocal loss
+            for Y_doc, dY_doc in zip(Y, dY):
+                loss += (dY_doc * Y_doc).mean()
+            return []
 
         batch_id = Tok2VecListener.get_batch_id(docs)
-        for listener in self.listeners[:-1]:
-            listener.receive(batch_id, tokvecs, accumulate_gradient)
-        if self.listeners:
-            self.listeners[-1].receive(batch_id, tokvecs, backprop)
+        for listener in self.listeners:
+            listener.receive(batch_id, Y, backprop)
+
         return losses
 
     def get_loss(self, examples, scores) -> None:
@@ -294,11 +281,16 @@ def forward(model: Tok2VecListener, inputs, is_train: bool):
                 if doc.tensor.size == 0:
                     raise ValueError(Errors.E203.format(name="tok2vec"))
                 else:
-                    outputs.append(doc.tensor)
+                    outputs.append(torch2xp(doc.tensor))
             return outputs, _empty_backprop
         else:
             model.verify_inputs(inputs)
-            return model._outputs, model._backprop
+
+            def backprop(dY):
+                dY_torch = [xp2torch(dY_doc_thinc) for dY_doc_thinc in dY]
+                return model._backprop(dY_torch)
+
+            return [torch2xp(Y_doc) for Y_doc in model._outputs], backprop
     else:
         # This is pretty grim, but it's hard to do better :(.
         # It's hard to avoid relying on the doc.tensor attribute, because the
@@ -316,7 +308,7 @@ def forward(model: Tok2VecListener, inputs, is_train: bool):
                 # so the output is valid.
                 outputs.append(model.ops.alloc2f(len(doc), width))
             else:
-                outputs.append(doc.tensor)
+                outputs.append(torch2xp(doc.tensor))
         return outputs, _empty_backprop
 
 

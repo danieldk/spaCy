@@ -207,6 +207,7 @@ def train_while_improving(
     words_seen = 0
     start_time = timer()
     for step, (epoch, batch) in enumerate(train_data):
+        step_losses = {}
         if before_update:
             before_update_args = {"step": step, "epoch": epoch}
             before_update(nlp, before_update_args)
@@ -215,7 +216,7 @@ def train_while_improving(
             nlp.update(
                 subbatch,
                 drop=dropout,
-                losses=losses,
+                losses=step_losses,
                 sgd=False,  # type: ignore[arg-type]
                 exclude=exclude,
                 annotates=annotating_components,
@@ -231,8 +232,22 @@ def train_while_improving(
                 proc.finish_update(optimizer)  # type: ignore[attr-defined]
         optimizer.step_schedules()
 
+        torch_loss = torch.scalar_tensor(0.0)
+        for loss in step_losses.values():
+            if isinstance(loss, torch.Tensor):
+                torch_loss += loss
+        if torch_loss.requires_grad:
+            torch_loss.backward()
+
         torch_optimizer.step()
         torch_optimizer.zero_grad()
+
+        for loss_name, loss in step_losses.items():
+            if loss_name in losses:
+                losses[loss_name] += float(loss)
+            else:
+                losses[loss_name] = float(loss)
+
         if not (step % eval_frequency):
             if optimizer.averages:
                 with nlp.use_params(optimizer.averages):

@@ -7,6 +7,8 @@ from wasabi import Printer
 import random
 import sys
 import shutil
+import torch
+import torch.nn as nn
 
 from .example import Example
 from ..schemas import ConfigSchemaTraining
@@ -60,6 +62,8 @@ def train(
     train_logger = T["logger"]
     before_to_disk = create_before_to_disk_callback(T["before_to_disk"])
     before_update = T["before_update"]
+    tok2vec_model: nn.Module = nlp.get_pipe("tok2vec").model
+    torch_optimizer = torch.optim.AdamW(tok2vec_model.parameters())
 
     # Helper function to save checkpoints. This is a closure for convenience,
     # to avoid passing in all the args all the time.
@@ -81,6 +85,7 @@ def train(
     training_step_iterator = train_while_improving(
         nlp,
         optimizer,
+        torch_optimizer,
         create_train_batches(nlp, train_corpus, batcher, T["max_epochs"]),
         create_evaluation_callback(nlp, dev_corpus, score_weights),
         dropout=T["dropout"],
@@ -142,6 +147,7 @@ def train(
 def train_while_improving(
     nlp: "Language",
     optimizer: Optimizer,
+    torch_optimizer: torch.optim.Optimizer,
     train_data,
     evaluate,
     *,
@@ -224,6 +230,9 @@ def train_while_improving(
             ):
                 proc.finish_update(optimizer)  # type: ignore[attr-defined]
         optimizer.step_schedules()
+
+        torch_optimizer.step()
+        torch_optimizer.zero_grad()
         if not (step % eval_frequency):
             if optimizer.averages:
                 with nlp.use_params(optimizer.averages):

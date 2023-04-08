@@ -1,8 +1,16 @@
-from typing import Optional, List, Union, cast
+from pathlib import Path
+from typing import List, Optional, Union, cast
+from io import BytesIO
+from thinc.backends import get_array_ops
 from thinc.types import Floats2d, Ints2d, Ragged, Ints1d
-from thinc.api import chain, clone, concatenate, with_array, with_padded
+from thinc.api import chain, clone, concatenate, torch2xp, with_array, with_padded
 from thinc.api import Model, noop, list2ragged, ragged2list, HashEmbed
 from thinc.api import expand_window, residual, Maxout, Mish, PyTorchLSTM
+from thinc.api import xp2torch
+import torch.nn as nn
+import torch
+
+from spacy.vocab import Vocab
 
 from ...tokens import Doc
 from ...util import registry
@@ -29,6 +37,72 @@ def get_tok2vec_width(model: Model):
         elif tok2vec.has_ref("listener"):
             nO = tok2vec.get_ref("listener").get_dim("nO")
     return nO
+
+
+@registry.architectures("spacy.Tok2VecAdapter.v0")
+def build_tok2vec_adapter(*, tok2vec):
+    return PoCAdapter(tok2vec)
+
+
+class PoCAdapter(Model):
+    name = "tok2vec-adapter"
+
+    def __init__(self, tok2vec: nn.Module):
+        super().__init__(name=self.name, forward=tok2vec_adapter_forward)
+        self.tok2vec = tok2vec
+
+
+def tok2vec_adapter_forward(model: PoCAdapter, inputs, is_train: bool):
+    with torch.set_grad_enabled(is_train):
+        Y_torch = model.tok2vec(inputs)
+
+    Y_thinc = [torch2xp(Y_doc) for Y_doc in Y_torch]
+
+    def backprop(dY_thinc):
+        for Y_doc_torch, dY_doc in zip(Y_torch, dY_thinc):
+            Y_doc_torch.backward(xp2torch(dY_doc), retain_graph=True)
+
+    return Y_thinc, backprop
+
+
+@registry.architectures("spacy.Torch2Vec.v0")
+def build_torch2vec(*, width: int, embed_size: int):
+    return PoCModel(width, embed_size)
+
+
+class PoCModel(nn.Module):
+    def __init__(self, width: int, embed_size: int):
+        super().__init__()
+        self.projection = nn.Linear(in_features=embed_size, out_features=width)
+
+    def forward(self, docs: List[Doc]):
+        keys = [doc.to_array("ORTH") for doc in docs]
+        ops = get_array_ops(keys[0])
+        keys = ops.flatten(keys)
+        vocab: Vocab = docs[0].vocab
+        rows = vocab.vectors.find(keys=keys)
+        V = ops.asarray(vocab.vectors.data)
+        V = V[rows]
+        projected = self.projection(xp2torch(V))
+        projected[rows < 0] = 0
+        return torch.split(projected, [len(doc) for doc in docs])
+
+    def to_bytes(self):
+        filelike = BytesIO()
+        torch.save(self.state_dict(), filelike)
+        filelike.seek(0)
+        return filelike.getvalue()
+
+    def to_disk(self, path: Union[Path, str]) -> None:
+        """Serialize the model to disk. Most models will serialize to a single
+        file, which should just be the bytes contents of model.to_bytes().
+        """
+        path = Path(path) if isinstance(path, str) else path
+        with path.open("wb") as file_:
+            file_.write(self.to_bytes())
+
+    def walk(self):
+        return []
 
 
 @registry.architectures("spacy.HashEmbedCNN.v2")

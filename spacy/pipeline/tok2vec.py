@@ -1,6 +1,8 @@
 from typing import Sequence, Iterable, Optional, Dict, Callable, List, Any
-from thinc.api import Model, set_dropout_rate, Optimizer, Config
+from thinc.api import Model, set_dropout_rate, Optimizer, Config, torch2xp, xp2torch
 from itertools import islice
+import torch
+import torch.nn as nn
 
 from .trainable_pipe import TrainablePipe
 from ..training import Example, validate_examples, validate_get_examples
@@ -26,7 +28,7 @@ DEFAULT_TOK2VEC_MODEL = Config().from_str(default_model_config)["model"]
 @Language.factory(
     "tok2vec", assigns=["doc.tensor"], default_config={"model": DEFAULT_TOK2VEC_MODEL}
 )
-def make_tok2vec(nlp: Language, name: str, model: Model) -> "Tok2Vec":
+def make_tok2vec(nlp: Language, name: str, model: nn.Module) -> "Tok2Vec":
     return Tok2Vec(nlp.vocab, model, name)
 
 
@@ -46,7 +48,7 @@ class Tok2Vec(TrainablePipe):
     sharing.
     """
 
-    def __init__(self, vocab: Vocab, model: Model, name: str = "tok2vec") -> None:
+    def __init__(self, vocab: Vocab, model: nn.Module, name: str = "tok2vec") -> None:
         """Initialize a tok2vec component.
 
         vocab (Vocab): The shared vocabulary.
@@ -122,7 +124,8 @@ class Tok2Vec(TrainablePipe):
             # Handle cases where there are no tokens in any docs.
             width = self.model.get_dim("nO")
             return [self.model.ops.alloc((0, width)) for doc in docs]
-        tokvecs = self.model.predict(docs)
+        with torch.no_grad():
+            tokvecs = self.model(docs)
         return tokvecs
 
     def set_annotations(self, docs: Sequence[Doc], tokvecses) -> None:

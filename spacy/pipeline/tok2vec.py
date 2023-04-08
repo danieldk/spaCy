@@ -165,9 +165,33 @@ class Tok2Vec(TrainablePipe):
         validate_examples(examples, "Tok2Vec.update")
         docs = [eg.predicted for eg in examples]
         set_dropout_rate(self.model, drop)
-        tokvecs = self.model(docs)
-        self.set_annotations(docs, tokvecs)
+        tokvecs, bp_tokvecs = self.model.begin_update(docs)
+        d_tokvecs = [self.model.ops.alloc2f(*t2v.shape) for t2v in tokvecs]
         losses.setdefault(self.name, 0.0)
+
+        def accumulate_gradient(one_d_tokvecs):
+            """Accumulate tok2vec loss and gradient. This is passed as a callback
+            to all but the last listener. Only the last one does the backprop.
+            """
+            nonlocal d_tokvecs
+            for i in range(len(one_d_tokvecs)):
+                d_tokvecs[i] += one_d_tokvecs[i]
+                losses[self.name] += float((one_d_tokvecs[i] ** 2).sum())
+            return [self.model.ops.alloc2f(*t2v.shape) for t2v in tokvecs]
+
+        def backprop(one_d_tokvecs):
+            """Callback to actually do the backprop. Passed to last listener."""
+            accumulate_gradient(one_d_tokvecs)
+            d_docs = bp_tokvecs(d_tokvecs)
+            if sgd is not None:
+                self.finish_update(sgd)
+            return d_docs
+
+        batch_id = Tok2VecListener.get_batch_id(docs)
+        for listener in self.listeners[:-1]:
+            listener.receive(batch_id, tokvecs, accumulate_gradient)
+        if self.listeners:
+            self.listeners[-1].receive(batch_id, tokvecs, backprop)
         return losses
 
     def get_loss(self, examples, scores) -> None:
@@ -193,7 +217,7 @@ class Tok2Vec(TrainablePipe):
         for example in islice(get_examples(), 10):
             doc_sample.append(example.x)
         assert doc_sample, Errors.E923.format(name=self.name)
-        # self.model.initialize(X=doc_sample)
+        self.model.initialize(X=doc_sample)
 
     def add_label(self, label):
         raise NotImplementedError
@@ -259,26 +283,41 @@ class Tok2VecListener(Model):
                 return True
 
 
-def forward(model: Tok2VecListener, docs: List[Doc], is_train: bool):
+def forward(model: Tok2VecListener, inputs, is_train: bool):
     """Supply the outputs from the upstream Tok2Vec component."""
-    width = model.get_dim("nO")
-    # This might occur during training when the tok2vec layer is frozen / hasn't been updated.
-    # In that case, it should be set to "annotating" so we can retrieve the embeddings from the doc.
-    Y_torch = []
-    for doc in docs:
-        if doc.tensor.size == 0:
-            if is_train:
-                raise ValueError(Errors.E203.format(name="tok2vec"))
-            else:
-                Y_torch.append(model.ops.alloc2f(len(doc), width))
+    if is_train:
+        # This might occur during training when the tok2vec layer is frozen / hasn't been updated.
+        # In that case, it should be set to "annotating" so we can retrieve the embeddings from the doc.
+        if model._batch_id is None:
+            outputs = []
+            for doc in inputs:
+                if doc.tensor.size == 0:
+                    raise ValueError(Errors.E203.format(name="tok2vec"))
+                else:
+                    outputs.append(doc.tensor)
+            return outputs, _empty_backprop
         else:
-            Y_torch.append(torch2xp(doc.tensor))
-
-    def backprop(dY):
-        for doc, dY_doc_thinc in zip(docs, dY):
-            doc.tensor.backward(xp2torch(dY_doc_thinc), retain_graph=True)
-
-    return Y_torch, backprop
+            model.verify_inputs(inputs)
+            return model._outputs, model._backprop
+    else:
+        # This is pretty grim, but it's hard to do better :(.
+        # It's hard to avoid relying on the doc.tensor attribute, because the
+        # pipeline components can batch the data differently during prediction.
+        # That doesn't happen in update, where the nlp object works on batches
+        # of data.
+        # When the components batch differently, we don't receive a matching
+        # prediction from the upstream, so we can't predict.
+        outputs = []
+        width = model.get_dim("nO")
+        for doc in inputs:
+            if doc.tensor.size == 0:
+                # But we do need to do *something* if the tensor hasn't been set.
+                # The compromise is to at least return data of the right shape,
+                # so the output is valid.
+                outputs.append(model.ops.alloc2f(len(doc), width))
+            else:
+                outputs.append(doc.tensor)
+        return outputs, _empty_backprop
 
 
 def _empty_backprop(dX):  # for pickling

@@ -237,7 +237,10 @@ cdef class TrainablePipe(Pipe):
 
         DOCS: https://spacy.io/api/pipe#use_params
         """
-        with self.model.use_params(params):
+        if isinstance(self.model, Model):
+            with self.model.use_params(params):
+                yield
+        else:
             yield
 
     def finish_update(self, sgd: Optimizer) -> None:
@@ -249,7 +252,8 @@ cdef class TrainablePipe(Pipe):
 
         DOCS: https://spacy.io/api/pipe#finish_update
         """
-        self.model.finish_update(sgd)
+        if isinstance(self.model, Model):
+            self.model.finish_update(sgd)
 
     def _validate_serialization_attrs(self):
         """Check that the pipe implements the required attributes. If a subclass

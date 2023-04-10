@@ -170,15 +170,9 @@ class Tok2Vec(TrainablePipe):
         loss = torch.scalar_tensor(0.0)
         losses.setdefault(self.name, loss)
 
-        def backprop(dY):
-            nonlocal loss
-            for Y_doc, dY_doc in zip(Y, dY):
-                loss += (dY_doc * Y_doc).sum()
-            return []
-
         batch_id = Tok2VecListener.get_batch_id(docs)
         for listener in self.listeners:
-            listener.receive(batch_id, Y, backprop)
+            listener.receive(batch_id, Y, loss)
 
         return losses
 
@@ -239,7 +233,7 @@ class Tok2VecListener(Model):
         self.upstream_name = upstream_name
         self._batch_id: Optional[int] = None
         self._outputs = None
-        self._backprop = None
+        self._loss = None
 
     @classmethod
     def get_batch_id(cls, inputs: Iterable[Doc]) -> int:
@@ -248,14 +242,14 @@ class Tok2VecListener(Model):
         """
         return sum(sum(token.orth for token in doc) for doc in inputs)
 
-    def receive(self, batch_id: int, outputs, backprop) -> None:
-        """Store a batch of training predictions and a backprop callback. The
+    def receive(self, batch_id: int, outputs, loss) -> None:
+        """Store a batch of training predictions and a mutable loss. The
         predictions and callback are produced by the upstream Tok2Vec component,
         and later will be used when the listener's component's model is called.
         """
         self._batch_id = batch_id
         self._outputs = outputs
-        self._backprop = backprop
+        self._loss = loss
 
     def verify_inputs(self, inputs) -> bool:
         """Check that the batch of Doc objects matches the ones we have a
@@ -288,8 +282,9 @@ def forward(model: Tok2VecListener, inputs, is_train: bool):
             model.verify_inputs(inputs)
 
             def backprop(dY):
-                dY_torch = [xp2torch(dY_doc_thinc) for dY_doc_thinc in dY]
-                return model._backprop(dY_torch)
+                for Y_doc, dY_doc in zip(model._outputs, dY):
+                    model._loss += (xp2torch(dY_doc) * Y_doc).sum()
+                return []
 
             return [torch2xp(Y_doc) for Y_doc in model._outputs], backprop
     else:

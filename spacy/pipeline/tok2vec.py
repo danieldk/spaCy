@@ -165,6 +165,7 @@ class Tok2Vec(TrainablePipe):
         validate_examples(examples, "Tok2Vec.update")
         docs = [eg.predicted for eg in examples]
         set_dropout_rate(self.model, drop)
+
         Y = self.model(docs)
         loss = torch.scalar_tensor(0.0)
         losses.setdefault(self.name, loss)
@@ -172,7 +173,7 @@ class Tok2Vec(TrainablePipe):
         def backprop(dY):
             nonlocal loss
             for Y_doc, dY_doc in zip(Y, dY):
-                loss += (dY_doc * Y_doc).mean()
+                loss += (dY_doc * Y_doc).sum()
             return []
 
         batch_id = Tok2VecListener.get_batch_id(docs)

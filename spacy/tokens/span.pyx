@@ -134,10 +134,8 @@ cdef class Span:
             else:
                 return True
 
-        cdef SpanC* span_c = self.span_c()
-        cdef SpanC* other_span_c = other.span_c()
-        self_tuple = (span_c.start_char, span_c.end_char, span_c.label, span_c.kb_id, self.id, self.doc)
-        other_tuple = (other_span_c.start_char, other_span_c.end_char, other_span_c.label, other_span_c.kb_id, other.id, other.doc)
+        self_tuple = self._cmp_tuple()
+        other_tuple = other._cmp_tuple()
         # <
         if op == 0:
             return self_tuple < other_tuple
@@ -158,8 +156,20 @@ cdef class Span:
             return self_tuple >= other_tuple
 
     def __hash__(self):
+        return hash(self._cmp_tuple())
+
+    def _cmp_tuple(self):
         cdef SpanC* span_c = self.span_c()
-        return hash((self.doc, span_c.start_char, span_c.end_char, span_c.label, span_c.kb_id, span_c.id))
+        return (
+            span_c.start_char,
+            span_c.end_char,
+            span_c.start,
+            span_c.end,
+            span_c.label,
+            span_c.kb_id,
+            span_c.id,
+            self.doc,
+        )
 
     def __len__(self):
         """Get the number of tokens in the span.
@@ -382,7 +392,7 @@ cdef class Span:
         result = xp.dot(vector, other.vector) / (self.vector_norm * other.vector_norm)
         # ensure we get a scalar back (numpy does this automatically but cupy doesn't)
         return result.item()
-    
+
     cpdef np.ndarray to_array(self, object py_attr_ids):
         """Given a list of M attribute IDs, export the tokens to a numpy
         `ndarray` of shape `(N, M)`, where `N` is the length of the document.
@@ -451,20 +461,21 @@ cdef class Span:
         """Obtain the sentences that contain this span. If the given span
         crosses sentence boundaries, return all sentences it is a part of.
 
-        RETURNS (Iterable[Span]): All sentences that the span is a part of.
+        RETURNS (Tuple[Span]): All sentences that the span is a part of.
 
-         DOCS: https://spacy.io/api/span#sents
+        DOCS: https://spacy.io/api/span#sents
         """
         cdef int start
         cdef int i
 
         if "sents" in self.doc.user_span_hooks:
-            yield from self.doc.user_span_hooks["sents"](self)
-        elif "sents" in self.doc.user_hooks:
+            return tuple(self.doc.user_span_hooks["sents"](self))
+        spans = []
+        if "sents" in self.doc.user_hooks:
             for sentence in self.doc.user_hooks["sents"](self.doc):
                 if sentence.end > self.start:
                     if sentence.start < self.end or sentence.start == self.start == self.end:
-                        yield sentence
+                        spans.append(sentence)
                     else:
                         break
         else:
@@ -479,12 +490,13 @@ cdef class Span:
             # Now, find all the sentences in the span
             for i in range(start + 1, self.doc.length):
                 if self.doc.c[i].sent_start == 1:
-                    yield Span(self.doc, start, i)
+                    spans.append(Span(self.doc, start, i))
                     start = i
                     if start >= self.end:
                         break
             if start < self.end:
-                yield Span(self.doc, start, self.end)
+                spans.append(Span(self.doc, start, self.end))
+        return tuple(spans)
 
 
     @property
@@ -492,7 +504,7 @@ cdef class Span:
         """The named entities that fall completely within the span. Returns
         a tuple of `Span` objects.
 
-        RETURNS (tuple): Entities in the span, one `Span` per entity.
+        RETURNS (Tuple[Span]): Entities in the span, one `Span` per entity.
 
         DOCS: https://spacy.io/api/span#ents
         """
@@ -507,7 +519,7 @@ cdef class Span:
                     ents.append(ent)
                 else:
                     break
-        return ents
+        return tuple(ents)
 
     @property
     def has_vector(self):
@@ -522,8 +534,6 @@ cdef class Span:
             return self.doc.user_span_hooks["has_vector"](self)
         elif self.vocab.vectors.size > 0:
             return any(token.has_vector for token in self)
-        elif self.doc.tensor.size > 0:
-            return True
         else:
             return False
 
@@ -605,13 +615,15 @@ cdef class Span:
         NP-level coordination, no prepositional phrases, and no relative
         clauses.
 
-        YIELDS (Span): Noun chunks in the span.
+        RETURNS (Tuple[Span]): Noun chunks in the span.
 
         DOCS: https://spacy.io/api/span#noun_chunks
         """
+        spans = []
         for span in self.doc.noun_chunks:
             if span.start >= self.start and span.end <= self.end:
-                yield span
+                spans.append(span)
+        return tuple(spans)
 
     @property
     def root(self):
@@ -656,22 +668,28 @@ cdef class Span:
         else:
             return self.doc[root]
 
-    def char_span(self, int start_idx, int end_idx, label=0, kb_id=0, vector=None, id=0):
+    def char_span(self, int start_idx, int end_idx, label=0, *, kb_id=0, vector=None, alignment_mode="strict", span_id=0):
         """Create a `Span` object from the slice `span.text[start : end]`.
 
-        start (int): The index of the first character of the span.
-        end (int): The index of the first character after the span.
-        label (uint64 or string): A label to attach to the Span, e.g. for
+        start_idx (int): The index of the first character of the span.
+        end_idx (int): The index of the first character after the span.
+        label (Union[int, str]): A label to attach to the Span, e.g. for
             named entities.
-        kb_id (uint64 or string):  An ID from a KB to capture the meaning of a named entity.
+        kb_id (Union[int, str]):  An ID from a KB to capture the meaning of a named entity.
         vector (ndarray[ndim=1, dtype='float32']): A meaning representation of
             the span.
+        alignment_mode (str): How character indices are aligned to token
+            boundaries. Options: "strict" (character indices must be aligned
+            with token boundaries), "contract" (span of all tokens completely
+            within the character span), "expand" (span of all tokens at least
+            partially covered by the character span). Defaults to "strict".
+        span_id (Union[int, str]): An identifier to associate with the span.
         RETURNS (Span): The newly constructed object.
         """
         cdef SpanC* span_c = self.span_c()
         start_idx += span_c.start_char
         end_idx += span_c.start_char
-        return self.doc.char_span(start_idx, end_idx, label=label, kb_id=kb_id, vector=vector)
+        return self.doc.char_span(start_idx, end_idx, label=label, kb_id=kb_id, vector=vector, alignment_mode=alignment_mode, span_id=span_id)
 
     @property
     def conjuncts(self):
@@ -754,36 +772,61 @@ cdef class Span:
             return self.span_c().start
 
         def __set__(self, int start):
-            if start < 0:
-                raise IndexError(Errors.E1032.format(var="start", forbidden="< 0", value=start))
-            self.span_c().start = start
+            if start < 0 or start > self.doc.length:
+                raise IndexError(Errors.E1032.format(var="start", obj="Doc", length=self.doc.length, value=start))
+            cdef SpanC* span_c = self.span_c()
+            if start > span_c.end:
+                raise ValueError(Errors.E4007.format(var="start", value=start, op="<=", existing_var="end", existing_value=span_c.end))
+            span_c.start = start
+            span_c.start_char = self.doc.c[start].idx
 
     property end:
         def __get__(self):
             return self.span_c().end
 
         def __set__(self, int end):
-            if end < 0:
-                raise IndexError(Errors.E1032.format(var="end", forbidden="< 0", value=end))
-            self.span_c().end = end
+            if end < 0 or end > self.doc.length:
+                raise IndexError(Errors.E1032.format(var="end", obj="Doc", length=self.doc.length, value=end))
+            cdef SpanC* span_c = self.span_c()
+            if span_c.start > end:
+                raise ValueError(Errors.E4007.format(var="end", value=end, op=">=", existing_var="start", existing_value=span_c.start))
+            span_c.end = end
+            if end > 0:
+                span_c.end_char = self.doc.c[end-1].idx + self.doc.c[end-1].lex.length
+            else:
+                span_c.end_char = 0
 
     property start_char:
         def __get__(self):
             return self.span_c().start_char
 
         def __set__(self, int start_char):
-            if start_char < 0:
-                raise IndexError(Errors.E1032.format(var="start_char", forbidden="< 0", value=start_char))
-            self.span_c().start_char = start_char
+            if start_char < 0 or start_char > len(self.doc.text):
+                raise IndexError(Errors.E1032.format(var="start_char", obj="Doc text", length=len(self.doc.text), value=start_char))
+            cdef int start = token_by_start(self.doc.c, self.doc.length, start_char)
+            if start < 0:
+                raise ValueError(Errors.E4008.format(value=start_char, pos="start"))
+            cdef SpanC* span_c = self.span_c()
+            if start_char > span_c.end_char:
+                raise ValueError(Errors.E4007.format(var="start_char", value=start_char, op="<=", existing_var="end_char", existing_value=span_c.end_char))
+            span_c.start_char = start_char
+            span_c.start = start
 
     property end_char:
         def __get__(self):
             return self.span_c().end_char
 
         def __set__(self, int end_char):
-            if end_char < 0:
-                raise IndexError(Errors.E1032.format(var="end_char", forbidden="< 0", value=end_char))
-            self.span_c().end_char = end_char
+            if end_char < 0 or end_char > len(self.doc.text):
+                raise IndexError(Errors.E1032.format(var="end_char", obj="Doc text", length=len(self.doc.text), value=end_char))
+            cdef int end = token_by_end(self.doc.c, self.doc.length, end_char)
+            if end < 0:
+                raise ValueError(Errors.E4008.format(value=end_char, pos="end"))
+            cdef SpanC* span_c = self.span_c()
+            if span_c.start_char > end_char:
+                raise ValueError(Errors.E4007.format(var="end_char", value=end_char, op=">=", existing_var="start_char", existing_value=span_c.start_char))
+            span_c.end_char = end_char
+            span_c.end = end
 
     property label:
         def __get__(self):

@@ -175,6 +175,18 @@ def test_modify_span_group(doc):
     assert group[0].label == doc.vocab.strings["TEST"]
 
 
+def test_char_span_attributes(doc):
+    label = "LABEL"
+    kb_id = "KB_ID"
+    span_id = "SPAN_ID"
+    span1 = doc.char_span(20, 45, label=label, kb_id=kb_id, span_id=span_id)
+    span2 = doc[1:].char_span(15, 40, label=label, kb_id=kb_id, span_id=span_id)
+    assert span1.text == span2.text
+    assert span1.label_ == span2.label_ == label
+    assert span1.kb_id_ == span2.kb_id_ == kb_id
+    assert span1.id_ == span2.id_ == span_id
+
+
 def test_spans_sent_spans(doc):
     sents = list(doc.sents)
     assert sents[0].start == 0
@@ -353,6 +365,14 @@ def test_spans_by_character(doc):
         span2 = doc.char_span(
             span1.start_char + 1, span1.end_char, label="GPE", alignment_mode="unk"
         )
+
+    # Span.char_span + alignment mode "contract"
+    span2 = doc[0:2].char_span(
+        span1.start_char - 3, span1.end_char, label="GPE", alignment_mode="contract"
+    )
+    assert span1.start_char == span2.start_char
+    assert span1.end_char == span2.end_char
+    assert span2.label_ == "GPE"
 
 
 def test_span_to_array(doc):
@@ -687,3 +707,50 @@ def test_span_ent_id(en_tokenizer):
     doc.ents = [span]
     assert doc.ents[0].ent_id_ == "ID2"
     assert doc[1].ent_id_ == "ID2"
+
+
+def test_span_start_end_sync(en_tokenizer):
+    doc = en_tokenizer("a bc def e fghij kl")
+    # can create and edit span starts/ends
+    span = doc[2:4]
+    span.start_char = 2
+    span.end = 5
+    assert span == doc[span.start : span.end]
+    assert span == doc.char_span(span.start_char, span.end_char)
+    # cannot set completely out of bounds starts/ends
+    with pytest.raises(IndexError):
+        span.start = -1
+    with pytest.raises(IndexError):
+        span.end = -1
+    with pytest.raises(IndexError):
+        span.start_char = len(doc.text) + 1
+    with pytest.raises(IndexError):
+        span.end = len(doc.text) + 1
+    # test all possible char starts/ends
+    span = doc[0 : len(doc)]
+    token_char_starts = [token.idx for token in doc]
+    token_char_ends = [token.idx + len(token.text) for token in doc]
+    for i in range(len(doc.text)):
+        if i not in token_char_starts:
+            with pytest.raises(ValueError):
+                span.start_char = i
+        else:
+            span.start_char = i
+    span = doc[0 : len(doc)]
+    for i in range(len(doc.text)):
+        if i not in token_char_ends:
+            with pytest.raises(ValueError):
+                span.end_char = i
+        else:
+            span.end_char = i
+    # start must be <= end
+    span = doc[1:3]
+    with pytest.raises(ValueError):
+        span.start = 4
+    with pytest.raises(ValueError):
+        span.end = 0
+    span = doc.char_span(2, 8)
+    with pytest.raises(ValueError):
+        span.start_char = 9
+    with pytest.raises(ValueError):
+        span.end_char = 1

@@ -2,17 +2,20 @@ from typing import List, Callable, Tuple, Dict, Iterable, Union, Any, IO
 from typing import Optional, TYPE_CHECKING
 from pathlib import Path
 from timeit import default_timer as timer
-from thinc.api import Optimizer, Config, constant, fix_random_seed, set_gpu_allocator
+from thinc.api import Optimizer, Config, constant
 from wasabi import Printer
 import random
 import sys
 import shutil
 
+
 from .example import Example
 from ..schemas import ConfigSchemaDistill, ConfigSchemaTraining
 from ..errors import Errors
 from ..tokens.doc import Doc
+from .. import ty
 from ..util import resolve_dot_names, registry, logger
+from ..util import set_gpu_allocator_from_config, set_seed_from_config
 
 if TYPE_CHECKING:
     from ..language import Language  # noqa: F401
@@ -31,10 +34,12 @@ def distill(
     stdout: IO = sys.stdout,
     stderr: IO = sys.stderr,
 ) -> Tuple["Language", Optional[Path]]:
-    """Train a pipeline.
+    """Distill a student pipeline from a teacher pipeline.
 
-    nlp (Language): The initialized nlp object with the full config.
-    output_path (Optional[Path]): Optional output path to save trained model to.
+    teacher (Language): The teacher pipeline to distill from.
+    student (Language): The student pipeline to distill into.
+    output_path (Optional[Path]): Optional output path to save the student
+        model to.
     use_gpu (int): Whether to train on GPU. Make sure to call require_gpu
         before calling this function.
     stdout (file): A file-like object to write output messages. To disable
@@ -42,19 +47,17 @@ def distill(
     stderr (file): A second file-like object to write output messages. To disable
         printing, set to io.StringIO.
 
-    RETURNS (tuple): The final nlp object and the path to the exported model.
+    RETURNS (tuple): The final student nlp object and the path to the exported
+        student model.
     """
     # We use no_print here so we can respect the stdout/stderr options.
     msg = Printer(no_print=True)
     # Create iterator, which yields out info after each optimization step.
     config = student.config.interpolate()
-    if config["training"]["seed"] is not None:
-        fix_random_seed(config["training"]["seed"])
-    allocator = config["training"]["gpu_allocator"]
-    if use_gpu >= 0 and allocator:
-        set_gpu_allocator(allocator)
+    set_seed_from_config(config)
+    set_gpu_allocator_from_config(config, use_gpu)
     T = registry.resolve(config["training"], schema=ConfigSchemaTraining)
-    D = registry.resolve(config["distill"], schema=ConfigSchemaDistill)
+    D = registry.resolve(config["distillation"], schema=ConfigSchemaDistill)
     dot_names = [D["corpus"], T["dev_corpus"]]
     distill_corpus, dev_corpus = resolve_dot_names(config, dot_names)
     optimizer = D["optimizer"]
@@ -98,7 +101,8 @@ def distill(
         student_to_teacher=student_to_teacher,
     )
     clean_output_dir(output_path)
-    stdout.write(msg.info(f"Pipeline: {student.pipe_names}") + "\n")
+    stdout.write(msg.info(f"Teacher pipeline: {teacher.pipe_names}") + "\n")
+    stdout.write(msg.info(f"Student pipeline: {student.pipe_names}") + "\n")
     if frozen_components:
         stdout.write(msg.info(f"Frozen components: {frozen_components}") + "\n")
     if annotating_components:
@@ -169,11 +173,8 @@ def train(
     msg = Printer(no_print=True)
     # Create iterator, which yields out info after each optimization step.
     config = nlp.config.interpolate()
-    if config["training"]["seed"] is not None:
-        fix_random_seed(config["training"]["seed"])
-    allocator = config["training"]["gpu_allocator"]
-    if use_gpu >= 0 and allocator:
-        set_gpu_allocator(allocator)
+    set_seed_from_config(config)
+    set_gpu_allocator_from_config(config, use_gpu)
     T = registry.resolve(config["training"], schema=ConfigSchemaTraining)
     dot_names = [T["train_corpus"], T["dev_corpus"]]
     train_corpus, dev_corpus = resolve_dot_names(config, dot_names)
@@ -266,8 +267,8 @@ def _distill_loop(
     teacher: "Language",
     student: "Language",
     optimizer: Optimizer,
-    train_data,
-    evaluate,
+    distill_data: Iterable[List[Example]],
+    evaluate: Callable[[], Tuple[float, Dict[str, float]]],
     *,
     dropout: float,
     eval_frequency: int,
@@ -278,19 +279,20 @@ def _distill_loop(
     before_update: Optional[Callable[["Language", Dict[str, Any]], None]],
     student_to_teacher: Dict[str, str],
 ):
-    """Train until an evaluation stops improving. Works as a generator,
-    with each iteration yielding a tuple `(batch, info, is_best_checkpoint)`,
-    where info is a dict, and is_best_checkpoint is in [True, False, None] --
-    None indicating that the iteration was not evaluated as a checkpoint.
-    The evaluation is conducted by calling the evaluate callback.
+    """Distill until the data is exhausted or the maximum number of steps
+    has been reached. Works as a generator, with each iteration yielding
+    a tuple `(batch, info, is_best_checkpoint)`, where info is a dict, and
+    is_best_checkpoint is in [True, False, None] -- None indicating that
+    the iteration was not evaluated as a checkpoint. The evaluation is
+    conducted by calling the evaluate callback.
 
     Positional arguments:
-        nlp: The spaCy pipeline to evaluate.
+        teacher (Language): The teacher pipeline to distill from.
+        student (Language): The student pipeline to distill into.
         optimizer: The optimizer callable.
-        train_data (Iterable[Batch]): A generator of batches, with the training
-            data. Each batch should be a Sized[Tuple[Input, Annot]]. The training
-            data iterable needs to take care of iterating over the epochs and
-            shuffling.
+        distill_data (Iterable[List[Example]]): A generator of batches,
+            with the distillation data. The distillation data iterable
+            needs to take care of iterating over the epochs and shuffling.
         evaluate (Callable[[], Tuple[float, Any]]): A callback to perform evaluation.
             The callback should take no arguments and return a tuple
             `(main_score, other_scores)`. The main_score should be a float where
@@ -324,31 +326,31 @@ def _distill_loop(
     losses: Dict[str, float] = {}
     words_seen = 0
     start_time = timer()
-    for step, (epoch, batch) in enumerate(train_data):
+    for step, (epoch, batch) in enumerate(distill_data):
         if before_update:
             before_update_args = {"step": step, "epoch": epoch}
             before_update(student, before_update_args)
-        dropout = dropouts(optimizer.step) 
+        dropout = dropouts(optimizer.step)
         for subbatch in subdivide_batch(batch, accumulate_gradient):
             student.distill(
                 teacher,
                 subbatch,
                 drop=dropout,
                 losses=losses,
-                sgd=None,
+                sgd=False,
                 exclude=exclude,
                 annotates=annotating_components,
                 student_to_teacher=student_to_teacher,
             )
         # TODO: refactor this so we don't have to run it separately in here
-        for name, proc in student.pipeline:
+        for student_name, student_proc in student.pipeline:
             if (
-                name not in exclude
-                and hasattr(proc, "is_trainable")
-                and proc.is_trainable
-                and proc.model not in (True, False, None)  # type: ignore[attr-defined]
+                student_name not in exclude
+                and isinstance(student_proc, ty.DistillableComponent)
+                and student_proc.is_distillable
+                and student_proc.model not in (False, None)  # type: ignore[attr-defined]
             ):
-                proc.finish_update(optimizer)  # type: ignore[attr-defined]
+                student_proc.finish_update(optimizer)  # type: ignore[attr-defined]
         optimizer.step_schedules()
         if not (step % eval_frequency):
             if optimizer.averages:
@@ -356,7 +358,7 @@ def _distill_loop(
                     score, other_scores = evaluate()
             else:
                 score, other_scores = evaluate()
-            optimizer.last_score = score
+            optimizer.last_score = score  # type: ignore[assignment]
             results.append((score, step))
             is_best_checkpoint = score == max(results)[0]
         else:
@@ -384,8 +386,8 @@ def _distill_loop(
 def train_while_improving(
     nlp: "Language",
     optimizer: Optimizer,
-    train_data,
-    evaluate,
+    train_data: Iterable[List[Example]],
+    evaluate: Callable[[], Tuple[float, Dict[str, float]]],
     *,
     dropout: float,
     eval_frequency: int,
@@ -405,10 +407,9 @@ def train_while_improving(
     Positional arguments:
         nlp: The spaCy pipeline to evaluate.
         optimizer: The optimizer callable.
-        train_data (Iterable[Batch]): A generator of batches, with the training
-            data. Each batch should be a Sized[Tuple[Input, Annot]]. The training
-            data iterable needs to take care of iterating over the epochs and
-            shuffling.
+        train_data (Iterable[List[Example]]): A generator of batches, with the
+            training data. The training data iterable needs to take care of
+            iterating over the epochs and shuffling.
         evaluate (Callable[[], Tuple[float, Any]]): A callback to perform evaluation.
             The callback should take no arguments and return a tuple
             `(main_score, other_scores)`. The main_score should be a float where
@@ -472,7 +473,7 @@ def train_while_improving(
                     score, other_scores = evaluate()
             else:
                 score, other_scores = evaluate()
-            optimizer.last_score = score
+            optimizer.last_score = score  # type: ignore[assignment]
             results.append((score, step))
             is_best_checkpoint = score == max(results)[0]
         else:
@@ -504,12 +505,15 @@ def train_while_improving(
             break
 
 
-def subdivide_batch(batch, accumulate_gradient):
+def subdivide_batch(
+    batch: Union[Iterable[Doc], Iterable[Example]], accumulate_gradient: int
+):
     batch = list(batch)
-    if isinstance(batch, Example):
-        batch.sort(key=lambda eg: len(eg.predicted))
-    elif isinstance(batch, Doc):
-        batch.sort(key=lambda doc: len(doc))
+    if len(batch):
+        if isinstance(batch[0], Example):
+            batch.sort(key=lambda eg: len(eg.predicted))
+        else:
+            batch.sort(key=lambda doc: len(doc))
     sub_len = len(batch) // accumulate_gradient
     start = 0
     for i in range(accumulate_gradient):
@@ -557,9 +561,11 @@ def create_evaluation_callback(
 def create_distill_batches(
     nlp: "Language",
     corpus: Callable[["Language"], Iterable[Example]],
-    batcher: Callable[[Iterable[Example]], Iterable[Example]],
+    batcher: Callable[[Iterable[Example]], Iterable[List[Example]]],
     max_epochs: int,
 ):
+    """Create distillation batches. In contrast to training, the corpus
+    is normally too large to load into memory and shuffle."""
     epoch = 0
     while max_epochs < 1 or epoch != max_epochs:
         examples = corpus(nlp)

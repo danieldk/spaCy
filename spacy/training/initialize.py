@@ -1,6 +1,5 @@
 from typing import Union, Dict, Optional, Any, IO, TYPE_CHECKING
-from thinc.api import Config, fix_random_seed, set_gpu_allocator
-from thinc.api import ConfigValidationError
+from thinc.api import Config, ConfigValidationError
 from pathlib import Path
 import srsly
 import numpy
@@ -19,6 +18,7 @@ from ..schemas import ConfigSchemaDistill, ConfigSchemaTraining
 from ..util import registry, load_model_from_config, resolve_dot_names, logger
 from ..util import load_model, ensure_path, get_sourced_components
 from ..util import OOV_RANK, DEFAULT_OOV_PROB
+from ..util import set_gpu_allocator_from_config, set_seed_from_config
 
 if TYPE_CHECKING:
     from ..language import Language  # noqa: F401
@@ -27,8 +27,8 @@ if TYPE_CHECKING:
 def init_nlp(config: Config, *, use_gpu: int = -1) -> "Language":
     raw_config = config
     config = raw_config.interpolate()
-    _set_seed_from_config(config)
-    _set_gpu_allocator_from_config(config, use_gpu)
+    set_seed_from_config(config)
+    set_gpu_allocator_from_config(config, use_gpu)
     # Use original config here before it's resolved to functions
     sourced = get_sourced_components(config)
     nlp = load_model_from_config(raw_config, auto_fill=True)
@@ -94,28 +94,20 @@ def init_nlp(config: Config, *, use_gpu: int = -1) -> "Language":
     return nlp
 
 
-def _set_gpu_allocator_from_config(config, use_gpu):
-    if "gpu_allocator" not in config["training"]:
-        raise ValueError(Errors.E1015.format(value="[training] gpu_allocator"))
-    allocator = config["training"]["gpu_allocator"]
-    if use_gpu >= 0 and allocator:
-        set_gpu_allocator(allocator)
-
-
-def _set_seed_from_config(config):
-    if "seed" not in config["training"]:
-        raise ValueError(Errors.E1015.format(value="[training] seed"))
-    if config["training"]["seed"] is not None:
-        fix_random_seed(config["training"]["seed"])
-
-
-def init_nlp_distill(
+def init_nlp_student(
     config: Config, teacher: "Language", *, use_gpu: int = -1
 ) -> "Language":
+    """Initialize student pipeline for distillation.
+
+    config (Config): Student model configuration.
+    teacher (Language): The teacher pipeline to distill from.
+    use_gpu (int): Whether to train on GPU. Make sure to call require_gpu
+        before calling this function.
+    """
     raw_config = config
     config = raw_config.interpolate()
-    _set_seed_from_config(config)
-    _set_gpu_allocator_from_config(config, use_gpu)
+    set_seed_from_config(config)
+    set_gpu_allocator_from_config(config, use_gpu)
 
     # Use original config here before it's resolved to functions
     sourced = get_sourced_components(config)
@@ -124,13 +116,11 @@ def init_nlp_distill(
     config = nlp.config.interpolate()
     # Resolve all training-relevant sections using the filled nlp config
     T = registry.resolve(config["training"], schema=ConfigSchemaTraining)
-    D = registry.resolve(config["distill"], schema=ConfigSchemaDistill)
-    dot_names = [D["corpus"], T["dev_corpus"]]
+    D = registry.resolve(config["distillation"], schema=ConfigSchemaDistill)
+    dot_names = [T["dev_corpus"]]
     if not isinstance(D["corpus"], str):
         raise ConfigValidationError(
-            desc=Errors.E897.format(
-                field="distill.corpus", type=type(D["corpus"])
-            )
+            desc=Errors.E897.format(field="distillation.corpus", type=type(D["corpus"]))
         )
     if not isinstance(T["dev_corpus"], str):
         raise ConfigValidationError(
@@ -138,7 +128,7 @@ def init_nlp_distill(
                 field="training.dev_corpus", type=type(T["dev_corpus"])
             )
         )
-    distill_corpus, dev_corpus = resolve_dot_names(config, dot_names)
+    (dev_corpus,) = resolve_dot_names(config, dot_names)
     optimizer = T["optimizer"]
     # Components that shouldn't be updated during training
     frozen_components = T["frozen_components"]
@@ -157,22 +147,21 @@ def init_nlp_distill(
     teacher_pipes = dict(teacher.pipeline)
     labels = {}
     for name, pipe in nlp.pipeline:
-        teacher_pipe_name = student_to_teacher[name] if name in student_to_teacher else name
-
-        # TODO: warn if we don't have a corresponding teacher pipe?
+        # Copy teacher labels.
+        teacher_pipe_name = (
+            student_to_teacher[name] if name in student_to_teacher else name
+        )
         teacher_pipe = teacher_pipes.get(teacher_pipe_name, None)
         if (
             teacher_pipe is not None
             and getattr(teacher_pipe, "label_data", None) is not None
         ):
-            labels[name] = teacher_pipe.label_data
+            labels[name] = teacher_pipe.label_data  # type: ignore[attr-defined]
 
     with nlp.select_pipes(disable=[*frozen_components, *resume_components]):
-        # TODO: not sure if we want the dev corpus here. The issue it that
-        # the distillation corpus does not have annotations, so it's not
-        # useable for annotation. I guess we could use the teacher to annotate
-        # docs and then pass those to the student for initialization? This
-        # is still something that I need to try.
+        # Initialize on the dev corpus, since the distillation corpus does
+        # usually not have labels. Since we copy the labels from the teacher
+        # pipe, the dev data does not have to be exhaustive.
         if T["max_epochs"] == -1:
             sample_size = 100
             logger.debug(

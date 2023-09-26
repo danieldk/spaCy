@@ -1,17 +1,17 @@
-# cython: infer_types=True, profile=True
-from typing import Iterable, Iterator, Optional, Dict, Tuple, Callable
+# cython: infer_types=True, profile=True, binding=True
+from typing import Callable, Dict, Iterable, Iterator, Optional, Tuple
+
 import srsly
-from thinc.api import set_dropout_rate, Model, Optimizer
+from thinc.api import Model, Optimizer, set_dropout_rate
 
 from ..tokens.doc cimport Doc
 
-from ..training import validate_examples
-from ..errors import Errors
-from .pipe import Pipe, deserialize_config
 from .. import util
-from ..vocab import Vocab
+from ..errors import Errors
 from ..language import Language
-from ..training import Example
+from ..training import Example, validate_distillation_examples, validate_examples
+from ..vocab import Vocab
+from .pipe import Pipe, deserialize_config
 
 
 cdef class TrainablePipe(Pipe):
@@ -56,40 +56,53 @@ cdef class TrainablePipe(Pipe):
             error_handler(self.name, self, [doc], e)
 
     def distill(self,
-               teacher_pipe: "TrainablePipe",
-               teacher_examples: Iterable["Example"],
-               student_examples: Iterable["Example"],
-               *,
-               drop: float=0.0,
-               sgd: Optimizer=None,
-               losses: Optional[Dict[str, float]]=None) -> Dict[str, float]:
+                teacher_pipe: Optional["TrainablePipe"],
+                examples: Iterable["Example"],
+                *,
+                drop: float = 0.0,
+                sgd: Optional[Optimizer] = None,
+                losses: Optional[Dict[str, float]] = None
+                ) -> Dict[str, float]:
+        """Train a pipe (the student) on the predictions of another pipe
+        (the teacher). The student is typically trained on the probability
+        distribution of the teacher, but details may differ per pipe.
+
+        teacher_pipe (Optional[TrainablePipe]): The teacher pipe to learn
+            from.
+        examples (Iterable[Example]): Distillation examples. The reference
+            (teacher) and predicted (student) docs must have the same number of
+            tokens and the same orthography.
+        drop (float): dropout rate.
+        sgd (Optional[Optimizer]): An optimizer. Will be created via
+            create_optimizer if not set.
+        losses (Optional[Dict[str, float]]): Optional record of loss during
+            distillation.
+        RETURNS: The updated losses dictionary.
+
+        DOCS: https://spacy.io/api/pipe#distill
+        """
+        # By default we require a teacher pipe, but there are downstream
+        # implementations that don't require a pipe.
+        if teacher_pipe is None:
+            raise ValueError(Errors.E4002.format(name=self.name))
         if losses is None:
             losses = {}
-        if not hasattr(self, "model") or self.model in (None, True, False):
-            return losses
         losses.setdefault(self.name, 0.0)
-
-        validate_examples(teacher_examples, "TrainablePipe.distill")
-        validate_examples(student_examples, "TrainablePipe.distill")
-
-        if not any(len(eg.predicted) if eg.predicted else 0 for eg in teacher_examples):
-            return losses
-        if not any(len(eg.predicted) if eg.predicted else 0 for eg in student_examples):
-            return losses
-
+        validate_distillation_examples(examples, "TrainablePipe.distill")
         set_dropout_rate(self.model, drop)
-        teacher_scores = teacher_pipe.model.predict([eg.predicted for eg in teacher_examples])
-        student_scores, bp_student_scores = self.model.begin_update([eg.predicted for eg in student_examples])
-
-        loss, d_scores = self.get_distill_loss(teacher_scores, student_scores)
+        for node in teacher_pipe.model.walk():
+            if node.name == "softmax":
+                node.attrs["softmax_normalize"] = True
+        teacher_scores = teacher_pipe.model.predict([eg.reference for eg in examples])
+        student_scores, bp_student_scores = self.model.begin_update([eg.predicted for eg in examples])
+        loss, d_scores = self.get_teacher_student_loss(teacher_scores, student_scores)
         bp_student_scores(d_scores)
-
-        if sgd not in (None, False):
+        if sgd is not None:
             self.finish_update(sgd)
         losses[self.name] += loss
         return losses
 
-    def pipe(self, stream: Iterable[Doc], *, batch_size: int=128) -> Iterator[Doc]:
+    def pipe(self, stream: Iterable[Doc], *, batch_size: int = 128) -> Iterator[Doc]:
         """Apply the pipe to a stream of documents. This usually happens under
         the hood when the nlp object is called on a text and all components are
         applied to the Doc.
@@ -136,9 +149,9 @@ cdef class TrainablePipe(Pipe):
     def update(self,
                examples: Iterable["Example"],
                *,
-               drop: float=0.0,
-               sgd: Optimizer=None,
-               losses: Optional[Dict[str, float]]=None) -> Dict[str, float]:
+               drop: float = 0.0,
+               sgd: Optimizer = None,
+               losses: Optional[Dict[str, float]] = None) -> Dict[str, float]:
         """Learn from a batch of documents and gold-standard information,
         updating the pipe's model. Delegates to predict and get_loss.
 
@@ -172,8 +185,8 @@ cdef class TrainablePipe(Pipe):
     def rehearse(self,
                  examples: Iterable[Example],
                  *,
-                 sgd: Optimizer=None,
-                 losses: Dict[str, float]=None,
+                 sgd: Optimizer = None,
+                 losses: Dict[str, float] = None,
                  **config) -> Dict[str, float]:
         """Perform a "rehearsal" update from a batch of data. Rehearsal updates
         teach the current model to make predictions similar to an initial model,
@@ -205,6 +218,19 @@ cdef class TrainablePipe(Pipe):
         """
         raise NotImplementedError(Errors.E931.format(parent="TrainablePipe", method="get_loss", name=self.name))
 
+    def get_teacher_student_loss(self, teacher_scores, student_scores):
+        """Calculate the loss and its gradient for a batch of student
+        scores, relative to teacher scores.
+
+        teacher_scores: Scores representing the teacher model's predictions.
+        student_scores: Scores representing the student model's predictions.
+
+        RETURNS (Tuple[float, float]): The loss and the gradient.
+
+        DOCS: https://spacy.io/api/pipe#get_teacher_student_loss
+        """
+        raise NotImplementedError(Errors.E931.format(parent="TrainablePipe", method="get_teacher_student_loss", name=self.name))
+
     def create_optimizer(self) -> Optimizer:
         """Create an optimizer for the pipeline component.
 
@@ -214,7 +240,7 @@ cdef class TrainablePipe(Pipe):
         """
         return util.create_default_optimizer()
 
-    def initialize(self, get_examples: Callable[[], Iterable[Example]], *, nlp: Language=None):
+    def initialize(self, get_examples: Callable[[], Iterable[Example]], *, nlp: Language = None):
         """Initialize the pipe for training, using data examples if available.
         This method needs to be implemented by each TrainablePipe component,
         ensuring the internal model (if available) is initialized properly
@@ -240,6 +266,14 @@ cdef class TrainablePipe(Pipe):
         DOCS: https://spacy.io/api/pipe#add_label
         """
         raise NotImplementedError(Errors.E931.format(parent="Pipe", method="add_label", name=self.name))
+
+    @property
+    def is_distillable(self) -> bool:
+        # Normally a pipe overrides `get_teacher_student_loss` to implement
+        # distillation. In more exceptional cases, a pipe can provide its
+        # own `distill` implementation. If neither of these methods is
+        # overridden, the pipe does not implement distillation.
+        return not (self.__class__.distill is TrainablePipe.distill and self.__class__.get_teacher_student_loss is TrainablePipe.get_teacher_student_loss)
 
     @property
     def is_trainable(self) -> bool:
@@ -379,3 +413,11 @@ cdef class TrainablePipe(Pipe):
         deserialize["model"] = load_model
         util.from_disk(path, deserialize, exclude)
         return self
+
+    @property
+    def save_activations(self):
+        return self._save_activations
+
+    @save_activations.setter
+    def save_activations(self, save_activations: bool):
+        self._save_activations = save_activations

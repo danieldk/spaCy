@@ -1,59 +1,72 @@
-from typing import List, Mapping, NoReturn, Union, Dict, Any, Set
-from typing import Optional, Iterable, Callable, Tuple, Type
-from typing import Iterator, Type, Pattern, Generator, TYPE_CHECKING
-from types import ModuleType
-import os
-import importlib
-import importlib.util
-import re
-from pathlib import Path
-import thinc
-from thinc.api import NumpyOps, get_current_ops, Adam, Config, Optimizer
-from thinc.api import ConfigValidationError, Model
 import functools
+import importlib
+import importlib.metadata
+import importlib.util
+import inspect
 import itertools
-import numpy.random
+import logging
+import os
+import pkgutil
+import re
+import shlex
+import shutil
+import socket
+import stat
+import subprocess
+import sys
+import tempfile
+import warnings
+from collections import defaultdict
+from contextlib import contextmanager
+from pathlib import Path
+from types import ModuleType
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Generator,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    NoReturn,
+    Optional,
+    Pattern,
+    Set,
+    Tuple,
+    Type,
+    Union,
+    cast,
+)
+
+import catalogue
+import langcodes
 import numpy
 import srsly
-import catalogue
-from catalogue import RegistryError, Registry
-import langcodes
-import sys
-import warnings
-from packaging.specifiers import SpecifierSet, InvalidSpecifier
-from packaging.version import Version, InvalidVersion
+import thinc
+from catalogue import Registry, RegistryError
 from packaging.requirements import Requirement
-import subprocess
-from contextlib import contextmanager
-from collections import defaultdict
-import tempfile
-import shutil
-import shlex
-import inspect
-import pkgutil
-import logging
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import InvalidVersion, Version
+from thinc.api import Adam, Config, ConfigValidationError, Model, NumpyOps, Optimizer
+from thinc.api import constant as constant_schedule
+from thinc.api import fix_random_seed, get_current_ops, set_gpu_allocator
 
 try:
     import cupy.random
 except ImportError:
     cupy = None
 
-# These are functions that were previously (v2.x) available from spacy.util
-# and have since moved to Thinc. We're importing them here so people's code
-# doesn't break, but they should always be imported from Thinc from now on,
-# not from spacy.util.
-from thinc.api import fix_random_seed, compounding, decaying  # noqa: F401
 
-
-from .symbols import ORTH
-from .compat import cupy, CudaStream, is_windows, importlib_metadata
-from .errors import Errors, Warnings, OLD_MODEL_SHORTCUTS
 from . import about
+from .compat import CudaStream, cupy, is_windows
+from .errors import Errors, Warnings
+from .symbols import ORTH
 
 if TYPE_CHECKING:
     # This lets us add type hints for mypy etc. without causing circular imports
-    from .language import Language  # noqa: F401
-    from .pipeline import Pipe  # noqa: F401
+    from .language import Language, PipeCallable  # noqa: F401
     from .tokens import Doc, Span  # noqa: F401
     from .vocab import Vocab  # noqa: F401
 
@@ -61,13 +74,12 @@ if TYPE_CHECKING:
 # fmt: off
 OOV_RANK = numpy.iinfo(numpy.uint64).max
 DEFAULT_OOV_PROB = -20
-LEXEME_NORM_LANGS = ["cs", "da", "de", "el", "en", "id", "lb", "mk", "pt", "ru", "sr", "ta", "th"]
+LEXEME_NORM_LANGS = ["cs", "da", "de", "el", "en", "grc", "id", "lb", "mk", "pt", "ru", "sr", "ta", "th"]
 
-# Default order of sections in the config.cfg. Not all sections needs to exist,
+# Default order of sections in the config file. Not all sections needs to exist,
 # and additional sections are added at the end, in alphabetical order.
 CONFIG_SECTION_ORDER = ["paths", "variables", "system", "nlp", "components", "corpora", "training", "pretraining", "initialize"]
 # fmt: on
-
 
 logger = logging.getLogger("spacy")
 logger_stream_handler = logging.StreamHandler()
@@ -146,8 +158,17 @@ class registry(thinc.registry):
         return func
 
     @classmethod
-    def find(cls, registry_name: str, func_name: str) -> Callable:
-        """Get info about a registered function from the registry."""
+    def find(
+        cls, registry_name: str, func_name: str
+    ) -> Dict[str, Optional[Union[str, int]]]:
+        """Find information about a registered function, including the
+        module and path to the file it's defined in, the line number and the
+        docstring, if available.
+
+        registry_name (str): Name of the catalogue registry.
+        func_name (str): Name of the registered function.
+        RETURNS (Dict[str, Optional[Union[str, int]]]): The function info.
+        """
         # We're overwriting this classmethod so we're able to provide more
         # specific error messages and implement a fallback to spacy-legacy.
         if not hasattr(cls, registry_name):
@@ -290,11 +311,11 @@ def find_matching_language(lang: str) -> Optional[str]:
     import spacy.lang  # noqa: F401
 
     if lang == "xx":
-        return "xx"
+        return "mul"
 
     # Find out which language modules we have
     possible_languages = []
-    for modinfo in pkgutil.iter_modules(spacy.lang.__path__):  # type: ignore
+    for modinfo in pkgutil.iter_modules(spacy.lang.__path__):  # type: ignore[attr-defined]
         code = modinfo.name
         if code == "xx":
             # Temporarily make 'xx' into a valid language code
@@ -308,11 +329,7 @@ def find_matching_language(lang: str) -> Optional[str]:
     # is labeled that way is probably trying to be distinct from 'zh' and
     # shouldn't automatically match.
     match = langcodes.closest_supported_match(lang, possible_languages, max_distance=9)
-    if match == "mul":
-        # Convert 'mul' back to spaCy's 'xx'
-        return "xx"
-    else:
-        return match
+    return match
 
 
 def get_lang_class(lang: str) -> Type["Language"]:
@@ -391,15 +408,21 @@ def get_module_path(module: ModuleType) -> Path:
     """
     if not hasattr(module, "__module__"):
         raise ValueError(Errors.E169.format(module=repr(module)))
-    return Path(sys.modules[module.__module__].__file__).parent
+    file_path = Path(cast(os.PathLike, sys.modules[module.__module__].__file__))
+    return file_path.parent
+
+
+# Default value for passed enable/disable values.
+_DEFAULT_EMPTY_PIPES = SimpleFrozenList()
 
 
 def load_model(
     name: Union[str, Path],
     *,
     vocab: Union["Vocab", bool] = True,
-    disable: Iterable[str] = SimpleFrozenList(),
-    exclude: Iterable[str] = SimpleFrozenList(),
+    disable: Union[str, Iterable[str]] = _DEFAULT_EMPTY_PIPES,
+    enable: Union[str, Iterable[str]] = _DEFAULT_EMPTY_PIPES,
+    exclude: Union[str, Iterable[str]] = _DEFAULT_EMPTY_PIPES,
     config: Union[Dict[str, Any], Config] = SimpleFrozenDict(),
 ) -> "Language":
     """Load a model from a package or data path.
@@ -407,12 +430,20 @@ def load_model(
     name (str): Package name or model path.
     vocab (Vocab / True): Optional vocab to pass in on initialization. If True,
         a new Vocab object will be created.
-    disable (Iterable[str]): Names of pipeline components to disable.
+    disable (Union[str, Iterable[str]]): Name(s) of pipeline component(s) to disable.
+    enable (Union[str, Iterable[str]]): Name(s) of pipeline component(s) to enable. All others will be disabled.
+    exclude (Union[str, Iterable[str]]):  Name(s) of pipeline component(s) to exclude.
     config (Dict[str, Any] / Config): Config overrides as nested dict or dict
         keyed by section values in dot notation.
     RETURNS (Language): The loaded nlp object.
     """
-    kwargs = {"vocab": vocab, "disable": disable, "exclude": exclude, "config": config}
+    kwargs = {
+        "vocab": vocab,
+        "disable": disable,
+        "enable": enable,
+        "exclude": exclude,
+        "config": config,
+    }
     if isinstance(name, str):  # name or string path
         if name.startswith("blank:"):  # shortcut for blank model
             return get_lang_class(name.replace("blank:", ""))()
@@ -422,8 +453,6 @@ def load_model(
             return load_model_from_path(Path(name), **kwargs)  # type: ignore[arg-type]
     elif hasattr(name, "exists"):  # Path or Path-like to model data
         return load_model_from_path(name, **kwargs)  # type: ignore[arg-type]
-    if name in OLD_MODEL_SHORTCUTS:
-        raise IOError(Errors.E941.format(name=name, full=OLD_MODEL_SHORTCUTS[name]))  # type: ignore[index]
     raise IOError(Errors.E050.format(name=name))
 
 
@@ -431,8 +460,9 @@ def load_model_from_package(
     name: str,
     *,
     vocab: Union["Vocab", bool] = True,
-    disable: Iterable[str] = SimpleFrozenList(),
-    exclude: Iterable[str] = SimpleFrozenList(),
+    disable: Union[str, Iterable[str]] = _DEFAULT_EMPTY_PIPES,
+    enable: Union[str, Iterable[str]] = _DEFAULT_EMPTY_PIPES,
+    exclude: Union[str, Iterable[str]] = _DEFAULT_EMPTY_PIPES,
     config: Union[Dict[str, Any], Config] = SimpleFrozenDict(),
 ) -> "Language":
     """Load a model from an installed package.
@@ -440,17 +470,19 @@ def load_model_from_package(
     name (str): The package name.
     vocab (Vocab / True): Optional vocab to pass in on initialization. If True,
         a new Vocab object will be created.
-    disable (Iterable[str]): Names of pipeline components to disable. Disabled
+    disable (Union[str, Iterable[str]]): Name(s) of pipeline component(s) to disable. Disabled
         pipes will be loaded but they won't be run unless you explicitly
         enable them by calling nlp.enable_pipe.
-    exclude (Iterable[str]): Names of pipeline components to exclude. Excluded
+    enable (Union[str, Iterable[str]]): Name(s) of pipeline component(s) to enable. All other
+        pipes will be disabled (and can be enabled using `nlp.enable_pipe`).
+    exclude (Union[str, Iterable[str]]): Name(s) of pipeline component(s) to exclude. Excluded
         components won't be loaded.
     config (Dict[str, Any] / Config): Config overrides as nested dict or dict
         keyed by section values in dot notation.
     RETURNS (Language): The loaded nlp object.
     """
     cls = importlib.import_module(name)
-    return cls.load(vocab=vocab, disable=disable, exclude=exclude, config=config)  # type: ignore[attr-defined]
+    return cls.load(vocab=vocab, disable=disable, enable=enable, exclude=exclude, config=config)  # type: ignore[attr-defined]
 
 
 def load_model_from_path(
@@ -458,21 +490,24 @@ def load_model_from_path(
     *,
     meta: Optional[Dict[str, Any]] = None,
     vocab: Union["Vocab", bool] = True,
-    disable: Iterable[str] = SimpleFrozenList(),
-    exclude: Iterable[str] = SimpleFrozenList(),
+    disable: Union[str, Iterable[str]] = _DEFAULT_EMPTY_PIPES,
+    enable: Union[str, Iterable[str]] = _DEFAULT_EMPTY_PIPES,
+    exclude: Union[str, Iterable[str]] = _DEFAULT_EMPTY_PIPES,
     config: Union[Dict[str, Any], Config] = SimpleFrozenDict(),
 ) -> "Language":
     """Load a model from a data directory path. Creates Language class with
     pipeline from config.cfg and then calls from_disk() with path.
 
-    model_path (Path): Mmodel path.
+    model_path (Path): Model path.
     meta (Dict[str, Any]): Optional model meta.
     vocab (Vocab / True): Optional vocab to pass in on initialization. If True,
         a new Vocab object will be created.
-    disable (Iterable[str]): Names of pipeline components to disable. Disabled
+    disable (Union[str, Iterable[str]]): Name(s) of pipeline component(s) to disable. Disabled
         pipes will be loaded but they won't be run unless you explicitly
         enable them by calling nlp.enable_pipe.
-    exclude (Iterable[str]): Names of pipeline components to exclude. Excluded
+    enable (Union[str, Iterable[str]]): Name(s) of pipeline component(s) to enable. All other
+        pipes will be disabled (and can be enabled using `nlp.enable_pipe`).
+    exclude (Union[str, Iterable[str]]): Name(s) of pipeline component(s) to exclude. Excluded
         components won't be loaded.
     config (Dict[str, Any] / Config): Config overrides as nested dict or dict
         keyed by section values in dot notation.
@@ -483,18 +518,27 @@ def load_model_from_path(
     if not meta:
         meta = get_model_meta(model_path)
     config_path = model_path / "config.cfg"
-    overrides = dict_to_dot(config)
+    overrides = dict_to_dot(config, for_overrides=True)
     config = load_config(config_path, overrides=overrides)
-    nlp = load_model_from_config(config, vocab=vocab, disable=disable, exclude=exclude)
+    nlp = load_model_from_config(
+        config,
+        vocab=vocab,
+        disable=disable,
+        enable=enable,
+        exclude=exclude,
+        meta=meta,
+    )
     return nlp.from_disk(model_path, exclude=exclude, overrides=overrides)
 
 
 def load_model_from_config(
     config: Union[Dict[str, Any], Config],
     *,
+    meta: Dict[str, Any] = SimpleFrozenDict(),
     vocab: Union["Vocab", bool] = True,
-    disable: Iterable[str] = SimpleFrozenList(),
-    exclude: Iterable[str] = SimpleFrozenList(),
+    disable: Union[str, Iterable[str]] = _DEFAULT_EMPTY_PIPES,
+    enable: Union[str, Iterable[str]] = _DEFAULT_EMPTY_PIPES,
+    exclude: Union[str, Iterable[str]] = _DEFAULT_EMPTY_PIPES,
     auto_fill: bool = False,
     validate: bool = True,
 ) -> "Language":
@@ -505,10 +549,12 @@ def load_model_from_config(
     meta (Dict[str, Any]): Optional model meta.
     vocab (Vocab / True): Optional vocab to pass in on initialization. If True,
         a new Vocab object will be created.
-    disable (Iterable[str]): Names of pipeline components to disable. Disabled
+    disable (Union[str, Iterable[str]]): Name(s) of pipeline component(s) to disable. Disabled
         pipes will be loaded but they won't be run unless you explicitly
         enable them by calling nlp.enable_pipe.
-    exclude (Iterable[str]): Names of pipeline components to exclude. Excluded
+    enable (Union[str, Iterable[str]]): Name(s) of pipeline component(s) to enable. All other
+        pipes will be disabled (and can be enabled using `nlp.enable_pipe`).
+    exclude (Union[str, Iterable[str]]): Name(s) of pipeline component(s) to exclude. Excluded
         components won't be loaded.
     auto_fill (bool): Whether to auto-fill config with missing defaults.
     validate (bool): Whether to show config validation errors.
@@ -526,9 +572,11 @@ def load_model_from_config(
         config,
         vocab=vocab,
         disable=disable,
+        enable=enable,
         exclude=exclude,
         auto_fill=auto_fill,
         validate=validate,
+        meta=meta,
     )
     return nlp
 
@@ -588,8 +636,9 @@ def load_model_from_init_py(
     init_file: Union[Path, str],
     *,
     vocab: Union["Vocab", bool] = True,
-    disable: Iterable[str] = SimpleFrozenList(),
-    exclude: Iterable[str] = SimpleFrozenList(),
+    disable: Union[str, Iterable[str]] = _DEFAULT_EMPTY_PIPES,
+    enable: Union[str, Iterable[str]] = _DEFAULT_EMPTY_PIPES,
+    exclude: Union[str, Iterable[str]] = _DEFAULT_EMPTY_PIPES,
     config: Union[Dict[str, Any], Config] = SimpleFrozenDict(),
 ) -> "Language":
     """Helper function to use in the `load()` method of a model package's
@@ -597,10 +646,12 @@ def load_model_from_init_py(
 
     vocab (Vocab / True): Optional vocab to pass in on initialization. If True,
         a new Vocab object will be created.
-    disable (Iterable[str]): Names of pipeline components to disable. Disabled
+    disable (Union[str, Iterable[str]]): Name(s) of pipeline component(s) to disable. Disabled
         pipes will be loaded but they won't be run unless you explicitly
         enable them by calling nlp.enable_pipe.
-    exclude (Iterable[str]): Names of pipeline components to exclude. Excluded
+    enable (Union[str, Iterable[str]]): Name(s) of pipeline component(s) to enable. All other
+        pipes will be disabled (and can be enabled using `nlp.enable_pipe`).
+    exclude (Union[str, Iterable[str]]): Name(s) of pipeline component(s) to exclude. Excluded
         components won't be loaded.
     config (Dict[str, Any] / Config): Config overrides as nested dict or dict
         keyed by section values in dot notation.
@@ -617,6 +668,7 @@ def load_model_from_init_py(
         vocab=vocab,
         meta=meta,
         disable=disable,
+        enable=enable,
         exclude=exclude,
         config=config,
     )
@@ -642,8 +694,8 @@ def load_config(
             sys.stdin.read(), overrides=overrides, interpolate=interpolate
         )
     else:
-        if not config_path or not config_path.exists() or not config_path.is_file():
-            raise IOError(Errors.E053.format(path=config_path, name="config.cfg"))
+        if not config_path or not config_path.is_file():
+            raise IOError(Errors.E053.format(path=config_path, name="config file"))
         return config.from_disk(
             config_path, overrides=overrides, interpolate=interpolate
         )
@@ -679,8 +731,8 @@ def get_package_version(name: str) -> Optional[str]:
     RETURNS (str / None): The version or None if package not installed.
     """
     try:
-        return importlib_metadata.version(name)  # type: ignore[attr-defined]
-    except importlib_metadata.PackageNotFoundError:  # type: ignore[attr-defined]
+        return importlib.metadata.version(name)  # type: ignore[attr-defined]
+    except importlib.metadata.PackageNotFoundError:  # type: ignore[attr-defined]
         return None
 
 
@@ -761,6 +813,15 @@ def get_model_lower_version(constraint: str) -> Optional[str]:
     except Exception:
         pass
     return None
+
+
+def is_prerelease_version(version: str) -> bool:
+    """Check whether a version is a prerelease version.
+
+    version (str): The version, e.g. "3.0.0.dev1".
+    RETURNS (bool): Whether the version is a prerelease version.
+    """
+    return Version(version).is_prerelease
 
 
 def get_base_version(version: str) -> str:
@@ -859,7 +920,7 @@ def is_package(name: str) -> bool:
     RETURNS (bool): True if installed package, False if not.
     """
     try:
-        importlib_metadata.distribution(name)  # type: ignore[attr-defined]
+        importlib.metadata.distribution(name)  # type: ignore[attr-defined]
         return True
     except:  # noqa: E722
         return False
@@ -871,11 +932,10 @@ def get_package_path(name: str) -> Path:
     name (str): Package name.
     RETURNS (Path): Path to installed package.
     """
-    name = name.lower()  # use lowercase version to be safe
     # Here we're importing the module just to find it. This is worryingly
     # indirect, but it's otherwise very difficult to find the package.
     pkg = importlib.import_module(name)
-    return Path(pkg.__file__).parent
+    return Path(cast(Union[str, os.PathLike], pkg.__file__)).parent
 
 
 def replace_model_node(model: Model, target: Model, replacement: Model) -> None:
@@ -998,8 +1058,15 @@ def make_tempdir() -> Generator[Path, None, None]:
     """
     d = Path(tempfile.mkdtemp())
     yield d
+
+    # On Windows, git clones use read-only files, which cause permission errors
+    # when being deleted. This forcibly fixes permissions.
+    def force_remove(rmfunc, path, ex):
+        os.chmod(path, stat.S_IWRITE)
+        rmfunc(path)
+
     try:
-        shutil.rmtree(str(d))
+        shutil.rmtree(str(d), onerror=force_remove)
     except PermissionError as e:
         warnings.warn(Warnings.W091.format(dir=d, msg=e))
 
@@ -1238,6 +1305,15 @@ def filter_spans(spans: Iterable["Span"]) -> List["Span"]:
     return result
 
 
+def filter_chain_spans(*spans: Iterable["Span"]) -> List["Span"]:
+    return filter_spans(itertools.chain(*spans))
+
+
+@registry.misc("spacy.first_longest_spans_filter.v1")
+def make_first_longest_spans_filter():
+    return filter_chain_spans
+
+
 def to_bytes(getters: Dict[str, Callable[[], bytes]], exclude: Iterable[str]) -> bytes:
     return srsly.msgpack_dumps(to_dict(getters, exclude))
 
@@ -1410,14 +1486,19 @@ def dot_to_dict(values: Dict[str, Any]) -> Dict[str, dict]:
     return result
 
 
-def dict_to_dot(obj: Dict[str, dict]) -> Dict[str, Any]:
+def dict_to_dot(obj: Dict[str, dict], *, for_overrides: bool = False) -> Dict[str, Any]:
     """Convert dot notation to a dict. For example: {"token": {"pos": True,
     "_": {"xyz": True }}} becomes {"token.pos": True, "token._.xyz": True}.
 
-    values (Dict[str, dict]): The dict to convert.
+    obj (Dict[str, dict]): The dict to convert.
+    for_overrides (bool): Whether to enable special handling for registered
+        functions in overrides.
     RETURNS (Dict[str, Any]): The key/value pairs.
     """
-    return {".".join(key): value for key, value in walk_dict(obj)}
+    return {
+        ".".join(key): value
+        for key, value in walk_dict(obj, for_overrides=for_overrides)
+    }
 
 
 def dot_to_object(config: Config, section: str):
@@ -1459,13 +1540,20 @@ def set_dot_to_object(config: Config, section: str, value: Any) -> None:
 
 
 def walk_dict(
-    node: Dict[str, Any], parent: List[str] = []
+    node: Dict[str, Any], parent: List[str] = [], *, for_overrides: bool = False
 ) -> Iterator[Tuple[List[str], Any]]:
-    """Walk a dict and yield the path and values of the leaves."""
+    """Walk a dict and yield the path and values of the leaves.
+
+    for_overrides (bool): Whether to treat registered functions that start with
+        @ as final values rather than dicts to traverse.
+    """
     for key, value in node.items():
         key_parent = [*parent, key]
-        if isinstance(value, dict):
-            yield from walk_dict(value, key_parent)
+        if isinstance(value, dict) and (
+            not for_overrides
+            or not any(value_key.startswith("@") for value_key in value)
+        ):
+            yield from walk_dict(value, key_parent, for_overrides=for_overrides)
         else:
             yield (key_parent, value)
 
@@ -1541,7 +1629,7 @@ def minibatch(items, size):
     if isinstance(size, int):
         size_ = itertools.repeat(size)
     else:
-        size_ = size
+        size_ = iter(size)
     items = iter(items)
     while True:
         batch_size = next(size_)
@@ -1590,9 +1678,11 @@ def check_bool_env_var(env_var: str) -> bool:
 
 def _pipe(
     docs: Iterable["Doc"],
-    proc: "Pipe",
+    proc: "PipeCallable",
     name: str,
-    default_error_handler: Callable[[str, "Pipe", List["Doc"], Exception], NoReturn],
+    default_error_handler: Callable[
+        [str, "PipeCallable", List["Doc"], Exception], NoReturn
+    ],
     kwargs: Mapping[str, Any],
 ) -> Iterator["Doc"]:
     if hasattr(proc, "pipe"):
@@ -1672,7 +1762,80 @@ def packages_distributions() -> Dict[str, List[str]]:
     it's not available in the builtin importlib.metadata.
     """
     pkg_to_dist = defaultdict(list)
-    for dist in importlib_metadata.distributions():  # type: ignore[attr-defined]
+    for dist in importlib.metadata.distributions():
         for pkg in (dist.read_text("top_level.txt") or "").split():
             pkg_to_dist[pkg].append(dist.metadata["Name"])
     return dict(pkg_to_dist)
+
+
+def all_equal(iterable):
+    """Return True if all the elements are equal to each other
+    (or if the input is an empty sequence), False otherwise."""
+    g = itertools.groupby(iterable)
+    return next(g, True) and not next(g, False)
+
+
+def _is_port_in_use(port: int, host: str = "localhost") -> bool:
+    """Check if 'host:port' is in use. Return True if it is, False otherwise.
+
+    port (int): the port to check
+    host (str): the host to check (default "localhost")
+    RETURNS (bool): Whether 'host:port' is in use.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind((host, port))
+        return False
+    except socket.error:
+        return True
+    finally:
+        s.close()
+
+
+def find_available_port(start: int, host: str, auto_select: bool = False) -> int:
+    """Given a starting port and a host, handle finding a port.
+
+    If `auto_select` is False, a busy port will raise an error.
+
+    If `auto_select` is True, the next free higher port will be used.
+
+    start (int): the port to start looking from
+    host (str): the host to find a port on
+    auto_select (bool): whether to automatically select a new port if the given port is busy (default False)
+    RETURNS (int): The port to use.
+    """
+    if not _is_port_in_use(start, host):
+        return start
+
+    port = start
+    if not auto_select:
+        raise ValueError(Errors.E1050.format(port=port))
+
+    while _is_port_in_use(port, host) and port < 65535:
+        port += 1
+
+    if port == 65535 and _is_port_in_use(port, host):
+        raise ValueError(Errors.E1049.format(host=host))
+
+    # if we get here, the port changed
+    warnings.warn(Warnings.W124.format(host=host, port=start, serve_port=port))
+    return port
+
+
+def set_gpu_allocator_from_config(config: Config, use_gpu: int):
+    """Change the global GPU allocator based to the value in
+    the configuration."""
+    if "gpu_allocator" not in config["training"]:
+        raise ValueError(Errors.E1015.format(value="[training] gpu_allocator"))
+    allocator = config["training"]["gpu_allocator"]
+    if use_gpu >= 0 and allocator:
+        set_gpu_allocator(allocator)
+
+
+def set_seed_from_config(config: Config):
+    """Set the random number generator seed to the value in
+    the configuration."""
+    if "seed" not in config["training"]:
+        raise ValueError(Errors.E1015.format(value="[training] seed"))
+    if config["training"]["seed"] is not None:
+        fix_random_seed(config["training"]["seed"])

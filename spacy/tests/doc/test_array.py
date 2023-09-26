@@ -1,6 +1,29 @@
+import numpy
 import pytest
+
+from spacy.attrs import DEP, MORPH, ORTH, POS, SHAPE
 from spacy.tokens import Doc
-from spacy.attrs import ORTH, SHAPE, POS, DEP, MORPH
+
+
+@pytest.mark.issue(2203)
+def test_issue2203(en_vocab):
+    """Test that lemmas are set correctly in doc.from_array."""
+    words = ["I", "'ll", "survive"]
+    tags = ["PRP", "MD", "VB"]
+    lemmas = ["-PRON-", "will", "survive"]
+    tag_ids = [en_vocab.strings.add(tag) for tag in tags]
+    lemma_ids = [en_vocab.strings.add(lemma) for lemma in lemmas]
+    doc = Doc(en_vocab, words=words)
+    # Work around lemma corruption problem and set lemmas after tags
+    doc.from_array("TAG", numpy.array(tag_ids, dtype="uint64"))
+    doc.from_array("LEMMA", numpy.array(lemma_ids, dtype="uint64"))
+    assert [t.tag_ for t in doc] == tags
+    assert [t.lemma_ for t in doc] == lemmas
+    # We need to serialize both tag and lemma, since this is what causes the bug
+    doc_array = doc.to_array(["TAG", "LEMMA"])
+    new_doc = Doc(doc.vocab, words=words).from_array(["TAG", "LEMMA"], doc_array)
+    assert [t.tag_ for t in new_doc] == tags
+    assert [t.lemma_ for t in new_doc] == lemmas
 
 
 def test_doc_array_attr_of_token(en_vocab):
@@ -100,14 +123,14 @@ def test_doc_from_array_heads_in_bounds(en_vocab):
 
     # head before start
     arr = doc.to_array(["HEAD"])
-    arr[0] = -1
+    arr[0] = numpy.int32(-1).astype(numpy.uint64)
     doc_from_array = Doc(en_vocab, words=words)
     with pytest.raises(ValueError):
         doc_from_array.from_array(["HEAD"], arr)
 
     # head after end
     arr = doc.to_array(["HEAD"])
-    arr[0] = 5
+    arr[0] = numpy.int32(5).astype(numpy.uint64)
     doc_from_array = Doc(en_vocab, words=words)
     with pytest.raises(ValueError):
         doc_from_array.from_array(["HEAD"], arr)

@@ -1,9 +1,27 @@
-from typing import Any, List, Dict, Tuple, Optional, Callable, Union, Iterator, Iterable
-from ..vocab import Vocab
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+    Union,
+    overload,
+)
+
 from ..tokens import Doc, Span
+from ..vocab import Vocab
 
 class Matcher:
-    def __init__(self, vocab: Vocab, validate: bool = ...) -> None: ...
+    def __init__(
+        self,
+        vocab: Vocab,
+        validate: bool = ...,
+        fuzzy_compare: Callable[[str, str, int], bool] = ...,
+    ) -> None: ...
     def __reduce__(self) -> Any: ...
     def __len__(self) -> int: ...
     def __contains__(self, key: str) -> bool: ...
@@ -31,12 +49,22 @@ class Matcher:
     ) -> Union[
         Iterator[Tuple[Tuple[Doc, Any], Any]], Iterator[Tuple[Doc, Any]], Iterator[Doc]
     ]: ...
+    @overload
     def __call__(
         self,
         doclike: Union[Doc, Span],
         *,
-        as_spans: bool = ...,
+        as_spans: Literal[False] = ...,
         allow_missing: bool = ...,
         with_alignments: bool = ...
-    ) -> Union[List[Tuple[int, int, int]], List[Span]]: ...
+    ) -> List[Tuple[int, int, int]]: ...
+    @overload
+    def __call__(
+        self,
+        doclike: Union[Doc, Span],
+        *,
+        as_spans: Literal[True],
+        allow_missing: bool = ...,
+        with_alignments: bool = ...
+    ) -> List[Span]: ...
     def _normalize_key(self, key: Any) -> Any: ...

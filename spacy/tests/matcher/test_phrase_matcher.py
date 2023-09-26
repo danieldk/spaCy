@@ -1,8 +1,157 @@
+import warnings
+
 import pytest
 import srsly
 from mock import Mock
-from spacy.matcher import PhraseMatcher
+
+from spacy.lang.en import English
+from spacy.matcher import Matcher, PhraseMatcher
 from spacy.tokens import Doc, Span
+from spacy.vocab import Vocab
+
+from ..util import make_tempdir
+
+
+@pytest.mark.issue(3248)
+def test_issue3248_1():
+    """Test that the PhraseMatcher correctly reports its number of rules, not
+    total number of patterns."""
+    nlp = English()
+    matcher = PhraseMatcher(nlp.vocab)
+    matcher.add("TEST1", [nlp("a"), nlp("b"), nlp("c")])
+    matcher.add("TEST2", [nlp("d")])
+    assert len(matcher) == 2
+
+
+@pytest.mark.issue(3331)
+def test_issue3331(en_vocab):
+    """Test that duplicate patterns for different rules result in multiple
+    matches, one per rule.
+    """
+    matcher = PhraseMatcher(en_vocab)
+    matcher.add("A", [Doc(en_vocab, words=["Barack", "Obama"])])
+    matcher.add("B", [Doc(en_vocab, words=["Barack", "Obama"])])
+    doc = Doc(en_vocab, words=["Barack", "Obama", "lifts", "America"])
+    matches = matcher(doc)
+    assert len(matches) == 2
+    match_ids = [en_vocab.strings[matches[0][0]], en_vocab.strings[matches[1][0]]]
+    assert sorted(match_ids) == ["A", "B"]
+
+
+@pytest.mark.issue(3972)
+def test_issue3972(en_vocab):
+    """Test that the PhraseMatcher returns duplicates for duplicate match IDs."""
+    matcher = PhraseMatcher(en_vocab)
+    matcher.add("A", [Doc(en_vocab, words=["New", "York"])])
+    matcher.add("B", [Doc(en_vocab, words=["New", "York"])])
+    doc = Doc(en_vocab, words=["I", "live", "in", "New", "York"])
+    matches = matcher(doc)
+
+    assert len(matches) == 2
+
+    # We should have a match for each of the two rules
+    found_ids = [en_vocab.strings[ent_id] for (ent_id, _, _) in matches]
+    assert "A" in found_ids
+    assert "B" in found_ids
+
+
+@pytest.mark.issue(4002)
+def test_issue4002(en_vocab):
+    """Test that the PhraseMatcher can match on overwritten NORM attributes."""
+    matcher = PhraseMatcher(en_vocab, attr="NORM")
+    pattern1 = Doc(en_vocab, words=["c", "d"])
+    assert [t.norm_ for t in pattern1] == ["c", "d"]
+    matcher.add("TEST", [pattern1])
+    doc = Doc(en_vocab, words=["a", "b", "c", "d"])
+    assert [t.norm_ for t in doc] == ["a", "b", "c", "d"]
+    matches = matcher(doc)
+    assert len(matches) == 1
+    matcher = PhraseMatcher(en_vocab, attr="NORM")
+    pattern2 = Doc(en_vocab, words=["1", "2"])
+    pattern2[0].norm_ = "c"
+    pattern2[1].norm_ = "d"
+    assert [t.norm_ for t in pattern2] == ["c", "d"]
+    matcher.add("TEST", [pattern2])
+    matches = matcher(doc)
+    assert len(matches) == 1
+
+
+@pytest.mark.issue(4373)
+def test_issue4373():
+    """Test that PhraseMatcher.vocab can be accessed (like Matcher.vocab)."""
+    matcher = Matcher(Vocab())
+    assert isinstance(matcher.vocab, Vocab)
+    matcher = PhraseMatcher(Vocab())
+    assert isinstance(matcher.vocab, Vocab)
+
+
+@pytest.mark.issue(4651)
+def test_issue4651_with_phrase_matcher_attr():
+    """Test that the entity_ruler PhraseMatcher is deserialized correctly using
+    the method from_disk when the entity_ruler argument phrase_matcher_attr is
+    specified.
+    """
+    text = "Spacy is a python library for nlp"
+    nlp = English()
+    patterns = [{"label": "PYTHON_LIB", "pattern": "spacy", "id": "spaCy"}]
+    config = {"phrase_matcher_attr": "LOWER"}
+    ruler = nlp.add_pipe("entity_ruler", config=config)
+    ruler.add_patterns(patterns)
+    doc = nlp(text)
+    res = [(ent.text, ent.label_, ent.ent_id_) for ent in doc.ents]
+    nlp_reloaded = English()
+    with make_tempdir() as d:
+        file_path = d / "entityruler"
+        ruler.to_disk(file_path)
+        nlp_reloaded.add_pipe("entity_ruler", config=config).from_disk(file_path)
+    doc_reloaded = nlp_reloaded(text)
+    res_reloaded = [(ent.text, ent.label_, ent.ent_id_) for ent in doc_reloaded.ents]
+    assert res == res_reloaded
+
+
+@pytest.mark.issue(6839)
+def test_issue6839(en_vocab):
+    """Ensure that PhraseMatcher accepts Span as input"""
+    # fmt: off
+    words = ["I", "like", "Spans", "and", "Docs", "in", "my", "input", ",", "and", "nothing", "else", "."]
+    # fmt: on
+    doc = Doc(en_vocab, words=words)
+    span = doc[:8]
+    pattern = Doc(en_vocab, words=["Spans", "and", "Docs"])
+    matcher = PhraseMatcher(en_vocab)
+    matcher.add("SPACY", [pattern])
+    matches = matcher(span)
+    assert matches
+
+
+@pytest.mark.issue(10643)
+def test_issue10643(en_vocab):
+    """Ensure overlapping terms can be removed from PhraseMatcher"""
+
+    # fmt: off
+    words = ["Only", "save", "out", "the", "binary", "data", "for", "the", "individual", "components", "."]
+    # fmt: on
+    doc = Doc(en_vocab, words=words)
+    terms = {
+        "0": Doc(en_vocab, words=["binary"]),
+        "1": Doc(en_vocab, words=["binary", "data"]),
+    }
+    matcher = PhraseMatcher(en_vocab)
+    for match_id, term in terms.items():
+        matcher.add(match_id, [term])
+
+    matches = matcher(doc)
+    assert matches == [(en_vocab.strings["0"], 4, 5), (en_vocab.strings["1"], 4, 6)]
+
+    matcher.remove("0")
+    assert len(matcher) == 1
+    new_matches = matcher(doc)
+    assert new_matches == [(en_vocab.strings["1"], 4, 6)]
+
+    matcher.remove("1")
+    assert len(matcher) == 0
+    no_matches = matcher(doc)
+    assert not no_matches
 
 
 def test_matcher_phrase_matcher(en_vocab):
@@ -48,28 +197,6 @@ def test_phrase_matcher_contains(en_vocab):
     matcher.add("TEST", [Doc(en_vocab, words=["test"])])
     assert "TEST" in matcher
     assert "TEST2" not in matcher
-
-
-def test_phrase_matcher_add_new_api(en_vocab):
-    doc = Doc(en_vocab, words=["a", "b"])
-    patterns = [Doc(en_vocab, words=["a"]), Doc(en_vocab, words=["a", "b"])]
-    matcher = PhraseMatcher(en_vocab)
-    matcher.add("OLD_API", None, *patterns)
-    assert len(matcher(doc)) == 2
-    matcher = PhraseMatcher(en_vocab)
-    on_match = Mock()
-    matcher.add("OLD_API_CALLBACK", on_match, *patterns)
-    assert len(matcher(doc)) == 2
-    assert on_match.call_count == 2
-    # New API: add(key: str, patterns: List[List[dict]], on_match: Callable)
-    matcher = PhraseMatcher(en_vocab)
-    matcher.add("NEW_API", patterns)
-    assert len(matcher(doc)) == 2
-    matcher = PhraseMatcher(en_vocab)
-    on_match = Mock()
-    matcher.add("NEW_API_CALLBACK", patterns, on_match=on_match)
-    assert len(matcher(doc)) == 2
-    assert on_match.call_count == 2
 
 
 def test_phrase_matcher_repeated_add(en_vocab):
@@ -197,13 +324,13 @@ def test_phrase_matcher_validation(en_vocab):
         matcher.add("TEST1", [doc1])
     with pytest.warns(UserWarning):
         matcher.add("TEST2", [doc2])
-    with pytest.warns(None) as record:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
         matcher.add("TEST3", [doc3])
-        assert not record.list
     matcher = PhraseMatcher(en_vocab, attr="POS", validate=True)
-    with pytest.warns(None) as record:
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
         matcher.add("TEST4", [doc2])
-        assert not record.list
 
 
 def test_attr_validation(en_vocab):
@@ -318,6 +445,13 @@ def test_phrase_matcher_deprecated(en_vocab):
             pass
         assert record.list
         assert "spaCy v3.0" in str(record.list[0].message)
+
+
+def test_phrase_matcher_non_doc(en_vocab):
+    matcher = PhraseMatcher(en_vocab)
+    doc = Doc(en_vocab, words=["hello", "world"])
+    with pytest.raises(ValueError):
+        matcher.add("TEST", [doc, "junk"])
 
 
 @pytest.mark.parametrize("attr", ["SENT_START", "IS_SENT_START"])

@@ -1,15 +1,21 @@
+import itertools
+
+import numpy
 import pytest
 from numpy.testing import assert_equal
-from spacy.attrs import DEP
+from thinc.api import Adam, fix_random_seed
 
+from spacy import registry, util
+from spacy.attrs import DEP, NORM
 from spacy.lang.en import English
-from spacy.training import Example
+from spacy.pipeline import DependencyParser
+from spacy.pipeline.dep_parser import DEFAULT_PARSER_MODEL
+from spacy.pipeline.tok2vec import DEFAULT_TOK2VEC_MODEL
 from spacy.tokens import Doc
-from spacy import util, registry
+from spacy.training import Example
+from spacy.vocab import Vocab
 
 from ..util import apply_transition_sequence, make_tempdir
-from ...pipeline import DependencyParser
-from ...pipeline.dep_parser import DEFAULT_PARSER_MODEL
 
 TRAIN_DATA = [
     (
@@ -56,7 +62,97 @@ PARTIAL_DATA = [
     ),
 ]
 
+PARSERS = ["parser"]  # TODO: Test beam_parser when ready
+
 eps = 0.1
+
+
+@pytest.fixture
+def vocab():
+    return Vocab(lex_attr_getters={NORM: lambda s: s})
+
+
+@pytest.fixture
+def parser(vocab):
+    vocab.strings.add("ROOT")
+    cfg = {"model": DEFAULT_PARSER_MODEL}
+    model = registry.resolve(cfg, validate=True)["model"]
+    parser = DependencyParser(vocab, model)
+    parser.cfg["token_vector_width"] = 4
+    parser.cfg["hidden_width"] = 32
+    # parser.add_label('right')
+    parser.add_label("left")
+    parser.initialize(lambda: [_parser_example(parser)])
+    sgd = Adam(0.001)
+
+    for i in range(10):
+        losses = {}
+        doc = Doc(vocab, words=["a", "b", "c", "d"])
+        example = Example.from_dict(
+            doc, {"heads": [1, 1, 3, 3], "deps": ["left", "ROOT", "left", "ROOT"]}
+        )
+        parser.update([example], sgd=sgd, losses=losses)
+    return parser
+
+
+def _parser_example(parser):
+    doc = Doc(parser.vocab, words=["a", "b", "c", "d"])
+    gold = {"heads": [1, 1, 3, 3], "deps": ["right", "ROOT", "left", "ROOT"]}
+    return Example.from_dict(doc, gold)
+
+
+@pytest.mark.issue(2772)
+def test_issue2772(en_vocab):
+    """Test that deprojectivization doesn't mess up sentence boundaries."""
+    # fmt: off
+    words = ["When", "we", "write", "or", "communicate", "virtually", ",", "we", "can", "hide", "our", "true", "feelings", "."]
+    # fmt: on
+    # A tree with a non-projective (i.e. crossing) arc
+    # The arcs (0, 4) and (2, 9) cross.
+    heads = [4, 2, 9, 2, 2, 4, 9, 9, 9, 9, 12, 12, 9, 9]
+    deps = ["dep"] * len(heads)
+    doc = Doc(en_vocab, words=words, heads=heads, deps=deps)
+    assert doc[1].is_sent_start is False
+
+
+@pytest.mark.issue(3830)
+def test_issue3830_no_subtok():
+    """Test that the parser doesn't have subtok label if not learn_tokens"""
+    config = {
+        "learn_tokens": False,
+    }
+    model = registry.resolve({"model": DEFAULT_PARSER_MODEL}, validate=True)["model"]
+    parser = DependencyParser(Vocab(), model, **config)
+    parser.add_label("nsubj")
+    assert "subtok" not in parser.labels
+    parser.initialize(lambda: [_parser_example(parser)])
+    assert "subtok" not in parser.labels
+
+
+@pytest.mark.issue(3830)
+def test_issue3830_with_subtok():
+    """Test that the parser does have subtok label if learn_tokens=True."""
+    config = {
+        "learn_tokens": True,
+    }
+    model = registry.resolve({"model": DEFAULT_PARSER_MODEL}, validate=True)["model"]
+    parser = DependencyParser(Vocab(), model, **config)
+    parser.add_label("nsubj")
+    assert "subtok" not in parser.labels
+    parser.initialize(lambda: [_parser_example(parser)])
+    assert "subtok" in parser.labels
+
+
+@pytest.mark.issue(7716)
+@pytest.mark.xfail(reason="Not fixed yet")
+def test_partial_annotation(parser):
+    doc = Doc(parser.vocab, words=["a", "b", "c", "d"])
+    doc[2].is_sent_start = False
+    # Note that if the following line is used, then doc[2].is_sent_start == False
+    # doc[3].is_sent_start = False
+
+    doc = parser(doc)
+    assert doc[2].is_sent_start == False
 
 
 def test_parser_root(en_vocab):
@@ -78,6 +174,57 @@ def test_parser_parse_one_word_sentence(en_vocab, en_parser, words):
     with en_parser.step_through(doc) as _:  # noqa: F841
         pass
     assert doc[0].dep != 0
+
+
+def test_parser_apply_actions(en_vocab, en_parser):
+    words = ["I", "ate", "pizza"]
+    words2 = ["Eat", "more", "pizza", "!"]
+    doc1 = Doc(en_vocab, words=words)
+    doc2 = Doc(en_vocab, words=words2)
+    docs = [doc1, doc2]
+
+    moves = en_parser.moves
+    moves.add_action(0, "")
+    moves.add_action(1, "")
+    moves.add_action(2, "nsubj")
+    moves.add_action(3, "obj")
+    moves.add_action(2, "amod")
+
+    actions = [
+        numpy.array([0, 0], dtype="i"),
+        numpy.array([2, 0], dtype="i"),
+        numpy.array([0, 4], dtype="i"),
+        numpy.array([3, 3], dtype="i"),
+        numpy.array([1, 1], dtype="i"),
+        numpy.array([1, 1], dtype="i"),
+        numpy.array([0], dtype="i"),
+        numpy.array([1], dtype="i"),
+    ]
+
+    states = moves.init_batch(docs)
+    active_states = states
+
+    for step_actions in actions:
+        active_states = moves.apply_actions(active_states, step_actions)
+
+    assert len(active_states) == 0
+
+    for state, doc in zip(states, docs):
+        moves.set_annotations(state, doc)
+
+    assert docs[0][0].head.i == 1
+    assert docs[0][0].dep_ == "nsubj"
+    assert docs[0][1].head.i == 1
+    assert docs[0][1].dep_ == "ROOT"
+    assert docs[0][2].head.i == 1
+    assert docs[0][2].dep_ == "obj"
+
+    assert docs[1][0].head.i == 0
+    assert docs[1][0].dep_ == "ROOT"
+    assert docs[1][1].head.i == 2
+    assert docs[1][1].dep_ == "amod"
+    assert docs[1][2].head.i == 0
+    assert docs[1][2].dep_ == "obj"
 
 
 @pytest.mark.skip(
@@ -228,7 +375,7 @@ def test_parser_constructor(en_vocab):
     DependencyParser(en_vocab, model)
 
 
-@pytest.mark.parametrize("pipe_name", ["parser", "beam_parser"])
+@pytest.mark.parametrize("pipe_name", PARSERS)
 def test_incomplete_data(pipe_name):
     # Test that the parser works with incomplete information
     nlp = English()
@@ -254,11 +401,15 @@ def test_incomplete_data(pipe_name):
     assert doc[2].head.i == 1
 
 
-@pytest.mark.parametrize("pipe_name", ["parser", "beam_parser"])
-def test_overfitting_IO(pipe_name):
+@pytest.mark.parametrize(
+    "pipe_name,max_moves", itertools.product(PARSERS, [0, 1, 5, 100])
+)
+def test_overfitting_IO(pipe_name, max_moves):
+    fix_random_seed(0)
     # Simple test to try and quickly overfit the dependency parser (normal or beam)
     nlp = English()
     parser = nlp.add_pipe(pipe_name)
+    parser.cfg["update_with_oracle_cut_size"] = max_moves
     train_examples = []
     for text, annotations in TRAIN_DATA:
         train_examples.append(Example.from_dict(nlp.make_doc(text), annotations))
@@ -303,6 +454,88 @@ def test_overfitting_IO(pipe_name):
     no_batch_deps = [doc.to_array([DEP]) for doc in [nlp(text) for text in texts]]
     assert_equal(batch_deps_1, batch_deps_2)
     assert_equal(batch_deps_1, no_batch_deps)
+
+
+def test_is_distillable():
+    nlp = English()
+    parser = nlp.add_pipe("parser")
+    assert parser.is_distillable
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("max_moves", [0, 1, 5, 100])
+def test_distill(max_moves):
+    teacher = English()
+    teacher_parser = teacher.add_pipe("parser")
+    train_examples = []
+    for text, annotations in TRAIN_DATA:
+        train_examples.append(Example.from_dict(teacher.make_doc(text), annotations))
+        for dep in annotations.get("deps", []):
+            teacher_parser.add_label(dep)
+
+    optimizer = teacher.initialize(get_examples=lambda: train_examples)
+
+    for i in range(200):
+        losses = {}
+        teacher.update(train_examples, sgd=optimizer, losses=losses)
+    assert losses["parser"] < 0.0001
+
+    student = English()
+    student_parser = student.add_pipe("parser")
+    student_parser.cfg["update_with_oracle_cut_size"] = max_moves
+    student_parser.initialize(
+        get_examples=lambda: train_examples, labels=teacher_parser.label_data
+    )
+
+    distill_examples = [
+        Example.from_dict(teacher.make_doc(t[0]), {}) for t in TRAIN_DATA
+    ]
+
+    for i in range(200):
+        losses = {}
+        student_parser.distill(
+            teacher_parser, distill_examples, sgd=optimizer, losses=losses
+        )
+    assert losses["parser"] < 0.0001
+
+    test_text = "I like securities."
+    doc = student(test_text)
+    assert doc[0].dep_ == "nsubj"
+    assert doc[2].dep_ == "dobj"
+    assert doc[3].dep_ == "punct"
+    assert doc[0].head.i == 1
+    assert doc[2].head.i == 1
+    assert doc[3].head.i == 1
+
+
+# fmt: off
+@pytest.mark.slow
+@pytest.mark.parametrize("pipe_name", ["parser", "beam_parser"])
+@pytest.mark.parametrize(
+    "parser_config",
+    [
+        # TODO: re-enable after we have a spacy-legacy release for v4. See
+        # https://github.com/explosion/spacy-legacy/pull/36
+        #({"@architectures": "spacy.TransitionBasedParser.v1", "tok2vec": DEFAULT_TOK2VEC_MODEL, "state_type": "parser", "extra_state_tokens": False, "hidden_width": 64, "maxout_pieces": 2, "use_upper": True}),
+        ({"@architectures": "spacy.TransitionBasedParser.v2", "tok2vec": DEFAULT_TOK2VEC_MODEL, "state_type": "parser", "extra_state_tokens": False, "hidden_width": 64, "maxout_pieces": 2, "use_upper": True}),
+        ({"@architectures": "spacy.TransitionBasedParser.v2", "tok2vec": DEFAULT_TOK2VEC_MODEL, "state_type": "parser", "extra_state_tokens": False, "hidden_width": 64, "maxout_pieces": 2, "use_upper": False}),
+        ({"@architectures": "spacy.TransitionBasedParser.v3", "tok2vec": DEFAULT_TOK2VEC_MODEL, "state_type": "parser", "extra_state_tokens": False, "hidden_width": 64, "maxout_pieces": 2}),
+    ],
+)
+# fmt: on
+def test_parser_configs(pipe_name, parser_config):
+    pipe_config = {"model": parser_config}
+    nlp = English()
+    parser = nlp.add_pipe(pipe_name, config=pipe_config)
+    train_examples = []
+    for text, annotations in TRAIN_DATA:
+        train_examples.append(Example.from_dict(nlp.make_doc(text), annotations))
+        for dep in annotations.get("deps", []):
+            parser.add_label(dep)
+    optimizer = nlp.initialize()
+    for i in range(5):
+        losses = {}
+        nlp.update(train_examples, sgd=optimizer, losses=losses)
 
 
 def test_beam_parser_scores():

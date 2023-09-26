@@ -1,6 +1,5 @@
+from ...attrs import LIKE_NUM, NORM
 from ..norm_exceptions import BASE_NORMS
-from ...attrs import NORM, LIKE_NUM
-
 
 # fmt: off
 _stem_suffixes = [
@@ -90,7 +89,7 @@ _eleven_to_beyond = [
     "अड़सठ",
     "उनहत्तर",
     "सत्तर",
-    "इकहत्तर"
+    "इकहत्तर",
     "बहत्तर",
     "तिहत्तर",
     "चौहत्तर",

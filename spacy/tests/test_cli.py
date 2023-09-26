@@ -1,28 +1,220 @@
+import math
+import os
+import time
+from collections import Counter
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
+import numpy
 import pytest
+import srsly
 from click import NoSuchOption
 from packaging.specifiers import SpecifierSet
-from spacy.training import docs_to_json, offsets_to_biluo_tags
-from spacy.training.converters import iob_to_docs, conll_ner_to_docs, conllu_to_docs
-from spacy.schemas import ProjectConfigSchema, RecommendationSchema, validate
-from spacy.lang.nl import Dutch
-from spacy.util import ENV_VARS, load_model_from_config
-from spacy.cli import info
-from spacy.cli.init_config import init_config, RECOMMENDATIONS
-from spacy.cli._util import validate_project_commands, parse_config_overrides
-from spacy.cli._util import load_project_config, substitute_project_variables
-from spacy.cli._util import is_subpath_of
-from spacy.cli._util import string_to_list
+from thinc.api import Config, ConfigValidationError
+
+import spacy
 from spacy import about
-from spacy.util import get_minor_version
-from spacy.cli.validate import get_model_pkgs
+from spacy.cli import info
+from spacy.cli._util import (
+    download_file,
+    is_subpath_of,
+    load_project_config,
+    parse_config_overrides,
+    string_to_list,
+    substitute_project_variables,
+    upload_file,
+    validate_project_commands,
+    walk_directory,
+)
+from spacy.cli.apply import apply
+from spacy.cli.debug_data import (
+    _compile_gold,
+    _get_distribution,
+    _get_kl_divergence,
+    _get_labels_from_model,
+    _get_labels_from_spancat,
+    _get_span_characteristics,
+    _get_spans_length_freq_dist,
+    _print_span_characteristics,
+)
 from spacy.cli.download import get_compatibility, get_version
-from spacy.cli.package import get_third_party_dependencies
-from thinc.api import ConfigValidationError, Config
-import srsly
-import os
+from spacy.cli.evaluate import render_parses
+from spacy.cli.find_threshold import find_threshold
+from spacy.cli.init_config import RECOMMENDATIONS, fill_config, init_config
+from spacy.cli.init_pipeline import _init_labels
+from spacy.cli.package import _is_permitted_package_name, get_third_party_dependencies
+from spacy.cli.project.remote_storage import RemoteStorage
+from spacy.cli.project.run import _check_requirements
+from spacy.cli.validate import get_model_pkgs
+from spacy.lang.en import English
+from spacy.lang.nl import Dutch
+from spacy.language import Language
+from spacy.schemas import ProjectConfigSchema, RecommendationSchema, validate
+from spacy.tokens import Doc, DocBin
+from spacy.tokens.span import Span
+from spacy.training import Example, docs_to_json, offsets_to_biluo_tags
+from spacy.training.converters import conll_ner_to_docs, conllu_to_docs, iob_to_docs
+from spacy.util import ENV_VARS, get_minor_version, load_config, load_model_from_config
 
 from .util import make_tempdir
-from ..cli.init_pipeline import _init_labels
+
+
+@pytest.mark.issue(4665)
+def test_cli_converters_conllu_empty_heads_ner():
+    """
+    conllu_to_docs should not raise an exception if the HEAD column contains an
+    underscore
+    """
+    input_data = """
+1	[	_	PUNCT	-LRB-	_	_	punct	_	_
+2	This	_	DET	DT	_	_	det	_	_
+3	killing	_	NOUN	NN	_	_	nsubj	_	_
+4	of	_	ADP	IN	_	_	case	_	_
+5	a	_	DET	DT	_	_	det	_	_
+6	respected	_	ADJ	JJ	_	_	amod	_	_
+7	cleric	_	NOUN	NN	_	_	nmod	_	_
+8	will	_	AUX	MD	_	_	aux	_	_
+9	be	_	AUX	VB	_	_	aux	_	_
+10	causing	_	VERB	VBG	_	_	root	_	_
+11	us	_	PRON	PRP	_	_	iobj	_	_
+12	trouble	_	NOUN	NN	_	_	dobj	_	_
+13	for	_	ADP	IN	_	_	case	_	_
+14	years	_	NOUN	NNS	_	_	nmod	_	_
+15	to	_	PART	TO	_	_	mark	_	_
+16	come	_	VERB	VB	_	_	acl	_	_
+17	.	_	PUNCT	.	_	_	punct	_	_
+18	]	_	PUNCT	-RRB-	_	_	punct	_	_
+"""
+    docs = list(conllu_to_docs(input_data))
+    # heads are all 0
+    assert not all([t.head.i for t in docs[0]])
+    # NER is unset
+    assert not docs[0].has_annotation("ENT_IOB")
+
+
+@pytest.mark.issue(4924)
+def test_issue4924():
+    nlp = Language()
+    example = Example.from_dict(nlp.make_doc(""), {})
+    nlp.evaluate([example])
+
+
+@pytest.mark.issue(7055)
+def test_issue7055():
+    """Test that fill-config doesn't turn sourced components into factories."""
+    source_cfg = {
+        "nlp": {"lang": "en", "pipeline": ["tok2vec", "tagger"]},
+        "components": {
+            "tok2vec": {"factory": "tok2vec"},
+            "tagger": {"factory": "tagger"},
+        },
+    }
+    source_nlp = English.from_config(source_cfg)
+    with make_tempdir() as dir_path:
+        # We need to create a loadable source pipeline
+        source_path = dir_path / "test_model"
+        source_nlp.to_disk(source_path)
+        base_cfg = {
+            "nlp": {"lang": "en", "pipeline": ["tok2vec", "tagger", "ner"]},
+            "components": {
+                "tok2vec": {"source": str(source_path)},
+                "tagger": {"source": str(source_path)},
+                "ner": {"factory": "ner"},
+            },
+        }
+        base_cfg = Config(base_cfg)
+        base_path = dir_path / "base.cfg"
+        base_cfg.to_disk(base_path)
+        output_path = dir_path / "config.cfg"
+        fill_config(output_path, base_path, silent=True)
+        filled_cfg = load_config(output_path)
+    assert filled_cfg["components"]["tok2vec"]["source"] == str(source_path)
+    assert filled_cfg["components"]["tagger"]["source"] == str(source_path)
+    assert filled_cfg["components"]["ner"]["factory"] == "ner"
+    assert "model" in filled_cfg["components"]["ner"]
+
+
+@pytest.mark.issue(11235)
+def test_issue11235():
+    """
+    Test that the cli handles interpolation in the directory names correctly when loading project config.
+    """
+    lang_var = "en"
+    variables = {"lang": lang_var}
+    commands = [{"name": "x", "script": ["hello ${vars.lang}"]}]
+    directories = ["cfg", "${vars.lang}_model"]
+    project = {"commands": commands, "vars": variables, "directories": directories}
+    with make_tempdir() as d:
+        srsly.write_yaml(d / "project.yml", project)
+        cfg = load_project_config(d)
+        # Check that the directories are interpolated and created correctly
+        assert os.path.exists(d / "cfg")
+        assert os.path.exists(d / f"{lang_var}_model")
+    assert cfg["commands"][0]["script"][0] == f"hello {lang_var}"
+
+
+@pytest.mark.issue(12566)
+@pytest.mark.parametrize(
+    "factory,output_file",
+    [("deps", "parses.html"), ("ents", "entities.html"), ("spans", "spans.html")],
+)
+def test_issue12566(factory: str, output_file: str):
+    """
+    Test if all displaCy types (ents, dep, spans) produce an HTML file
+    """
+    with make_tempdir() as tmp_dir:
+        # Create sample spaCy file
+        doc_json = {
+            "ents": [
+                {"end": 54, "label": "nam_adj_country", "start": 44},
+                {"end": 83, "label": "nam_liv_person", "start": 69},
+                {"end": 100, "label": "nam_pro_title_book", "start": 86},
+            ],
+            "spans": {
+                "sc": [
+                    {"end": 54, "kb_id": "", "label": "nam_adj_country", "start": 44},
+                    {"end": 83, "kb_id": "", "label": "nam_liv_person", "start": 69},
+                    {
+                        "end": 100,
+                        "kb_id": "",
+                        "label": "nam_pro_title_book",
+                        "start": 86,
+                    },
+                ]
+            },
+            "text": "Niedawno czytał em nową książkę znakomitego szkockiego medioznawcy , "
+            "Briana McNaira - Cultural Chaos .",
+            "tokens": [
+                # fmt: off
+                {"id": 0, "start": 0, "end": 8, "tag": "ADV", "pos": "ADV", "morph": "Degree=Pos", "lemma": "niedawno", "dep": "advmod", "head": 1, },
+                {"id": 1, "start": 9, "end": 15, "tag": "PRAET", "pos": "VERB", "morph": "Animacy=Hum|Aspect=Imp|Gender=Masc|Mood=Ind|Number=Sing|Tense=Past|VerbForm=Fin|Voice=Act", "lemma": "czytać", "dep": "ROOT", "head": 1, },
+                {"id": 2, "start": 16, "end": 18, "tag": "AGLT", "pos": "NOUN", "morph": "Animacy=Inan|Case=Ins|Gender=Masc|Number=Sing", "lemma": "em", "dep": "iobj", "head": 1, },
+                {"id": 3, "start": 19, "end": 23, "tag": "ADJ", "pos": "ADJ", "morph": "Case=Acc|Degree=Pos|Gender=Fem|Number=Sing", "lemma": "nowy", "dep": "amod", "head": 4, },
+                {"id": 4, "start": 24, "end": 31, "tag": "SUBST", "pos": "NOUN", "morph": "Case=Acc|Gender=Fem|Number=Sing", "lemma": "książka", "dep": "obj", "head": 1, },
+                {"id": 5, "start": 32, "end": 43, "tag": "ADJ", "pos": "ADJ", "morph": "Animacy=Nhum|Case=Gen|Degree=Pos|Gender=Masc|Number=Sing", "lemma": "znakomit", "dep": "acl", "head": 4, },
+                {"id": 6, "start": 44, "end": 54, "tag": "ADJ", "pos": "ADJ", "morph": "Animacy=Hum|Case=Gen|Degree=Pos|Gender=Masc|Number=Sing", "lemma": "szkockiy", "dep": "amod", "head": 7, },
+                {"id": 7, "start": 55, "end": 66, "tag": "SUBST", "pos": "NOUN", "morph": "Animacy=Hum|Case=Gen|Gender=Masc|Number=Sing", "lemma": "medioznawca", "dep": "iobj", "head": 5, },
+                {"id": 8, "start": 67, "end": 68, "tag": "INTERP", "pos": "PUNCT", "morph": "PunctType=Comm", "lemma": ",", "dep": "punct", "head": 9, },
+                {"id": 9, "start": 69, "end": 75, "tag": "SUBST", "pos": "PROPN", "morph": "Animacy=Hum|Case=Gen|Gender=Masc|Number=Sing", "lemma": "Brian", "dep": "nmod", "head": 4, },
+                {"id": 10, "start": 76, "end": 83, "tag": "SUBST", "pos": "PROPN", "morph": "Animacy=Hum|Case=Gen|Gender=Masc|Number=Sing", "lemma": "McNair", "dep": "flat", "head": 9, },
+                {"id": 11, "start": 84, "end": 85, "tag": "INTERP", "pos": "PUNCT", "morph": "PunctType=Dash", "lemma": "-", "dep": "punct", "head": 12, },
+                {"id": 12, "start": 86, "end": 94, "tag": "SUBST", "pos": "PROPN", "morph": "Animacy=Inan|Case=Nom|Gender=Masc|Number=Sing", "lemma": "Cultural", "dep": "conj", "head": 4, },
+                {"id": 13, "start": 95, "end": 100, "tag": "SUBST", "pos": "NOUN", "morph": "Animacy=Inan|Case=Nom|Gender=Masc|Number=Sing", "lemma": "Chaos", "dep": "flat", "head": 12, },
+                {"id": 14, "start": 101, "end": 102, "tag": "INTERP", "pos": "PUNCT", "morph": "PunctType=Peri", "lemma": ".", "dep": "punct", "head": 1, },
+                # fmt: on
+            ],
+        }
+
+        # Create a .spacy file
+        nlp = spacy.blank("pl")
+        doc = Doc(nlp.vocab).from_json(doc_json)
+
+        # Run the evaluate command and check if the html files exist
+        render_parses(
+            docs=[doc], output_path=tmp_dir, model_name="", limit=1, **{factory: True}
+        )
+
+        assert (tmp_dir / output_file).is_file()
 
 
 def test_cli_info():
@@ -134,7 +326,6 @@ def test_cli_converters_conllu_to_docs_subtokens():
     sent = converted[0]["paragraphs"][0]["sentences"][0]
     assert len(sent["tokens"]) == 4
     tokens = sent["tokens"]
-    print(tokens)
     assert [t["orth"] for t in tokens] == ["Dommer", "FE", "avstår", "."]
     assert [t["tag"] for t in tokens] == [
         "NOUN__Definite=Ind|Gender=Masc|Number=Sing",
@@ -259,6 +450,7 @@ def test_project_config_validation_full():
         "assets": [
             {
                 "dest": "x",
+                "extra": True,
                 "url": "https://example.com",
                 "checksum": "63373dd656daa1fd3043ce166a59474c",
             },
@@ -269,6 +461,12 @@ def test_project_config_validation_full():
                     "branch": "develop",
                     "path": "y",
                 },
+            },
+            {
+                "dest": "z",
+                "extra": False,
+                "url": "https://example.com",
+                "checksum": "63373dd656daa1fd3043ce166a59474c",
             },
         ],
         "commands": [
@@ -427,7 +625,14 @@ def test_parse_cli_overrides():
 
 @pytest.mark.parametrize("lang", ["en", "nl"])
 @pytest.mark.parametrize(
-    "pipeline", [["tagger", "parser", "ner"], [], ["ner", "textcat", "sentencizer"]]
+    "pipeline",
+    [
+        ["tagger", "parser", "ner"],
+        [],
+        ["ner", "textcat", "sentencizer"],
+        ["morphologizer", "spancat", "entity_linker"],
+        ["spancat_singlelabel", "textcat_multilabel"],
+    ],
 )
 @pytest.mark.parametrize("optimize", ["efficiency", "accuracy"])
 @pytest.mark.parametrize("pretraining", [True, False])
@@ -565,7 +770,16 @@ def test_get_third_party_dependencies():
             }
         },
     )
-    get_third_party_dependencies(nlp.config) == []
+    assert get_third_party_dependencies(nlp.config) == []
+
+    # Test with lang-specific factory
+    @Dutch.factory("third_party_test")
+    def test_factory(nlp, name):
+        return lambda x: x
+
+    nlp.add_pipe("third_party_test")
+    # Before #9674 this would throw an exception
+    get_third_party_dependencies(nlp.config)
 
 
 @pytest.mark.parametrize(
@@ -581,3 +795,558 @@ def test_get_third_party_dependencies():
 )
 def test_is_subpath_of(parent, child, expected):
     assert is_subpath_of(parent, child) == expected
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "factory_name,pipe_name",
+    [
+        ("ner", "ner"),
+        ("ner", "my_ner"),
+        ("spancat", "spancat"),
+        ("spancat", "my_spancat"),
+    ],
+)
+def test_get_labels_from_model(factory_name, pipe_name):
+    labels = ("A", "B")
+
+    nlp = English()
+    pipe = nlp.add_pipe(factory_name, name=pipe_name)
+    for label in labels:
+        pipe.add_label(label)
+    nlp.initialize()
+    assert nlp.get_pipe(pipe_name).labels == labels
+    if factory_name == "spancat":
+        assert _get_labels_from_spancat(nlp)[pipe.key] == set(labels)
+    else:
+        assert _get_labels_from_model(nlp, factory_name) == set(labels)
+
+
+def test_permitted_package_names():
+    # https://www.python.org/dev/peps/pep-0426/#name
+    assert _is_permitted_package_name("Meine_Bäume") == False
+    assert _is_permitted_package_name("_package") == False
+    assert _is_permitted_package_name("package_") == False
+    assert _is_permitted_package_name(".package") == False
+    assert _is_permitted_package_name("package.") == False
+    assert _is_permitted_package_name("-package") == False
+    assert _is_permitted_package_name("package-") == False
+
+
+def test_debug_data_compile_gold():
+    nlp = English()
+    pred = Doc(nlp.vocab, words=["Token", ".", "New", "York", "City"])
+    ref = Doc(
+        nlp.vocab,
+        words=["Token", ".", "New York City"],
+        sent_starts=[True, False, True],
+        ents=["O", "O", "B-ENT"],
+    )
+    eg = Example(pred, ref)
+    data = _compile_gold([eg], ["ner"], nlp, True)
+    assert data["boundary_cross_ents"] == 0
+
+    pred = Doc(nlp.vocab, words=["Token", ".", "New", "York", "City"])
+    ref = Doc(
+        nlp.vocab,
+        words=["Token", ".", "New York City"],
+        sent_starts=[True, False, True],
+        ents=["O", "B-ENT", "I-ENT"],
+    )
+    eg = Example(pred, ref)
+    data = _compile_gold([eg], ["ner"], nlp, True)
+    assert data["boundary_cross_ents"] == 1
+
+
+@pytest.mark.parametrize("component_name", ["spancat", "spancat_singlelabel"])
+def test_debug_data_compile_gold_for_spans(component_name):
+    nlp = English()
+    spans_key = "sc"
+
+    pred = Doc(nlp.vocab, words=["Welcome", "to", "the", "Bank", "of", "China", "."])
+    pred.spans[spans_key] = [Span(pred, 3, 6, "ORG"), Span(pred, 5, 6, "GPE")]
+    ref = Doc(nlp.vocab, words=["Welcome", "to", "the", "Bank", "of", "China", "."])
+    ref.spans[spans_key] = [Span(ref, 3, 6, "ORG"), Span(ref, 5, 6, "GPE")]
+    eg = Example(pred, ref)
+
+    data = _compile_gold([eg], [component_name], nlp, True)
+
+    assert data["spancat"][spans_key] == Counter({"ORG": 1, "GPE": 1})
+    assert data["spans_length"][spans_key] == {"ORG": [3], "GPE": [1]}
+    assert data["spans_per_type"][spans_key] == {
+        "ORG": [Span(ref, 3, 6, "ORG")],
+        "GPE": [Span(ref, 5, 6, "GPE")],
+    }
+    assert data["sb_per_type"][spans_key] == {
+        "ORG": {"start": [ref[2:3]], "end": [ref[6:7]]},
+        "GPE": {"start": [ref[4:5]], "end": [ref[6:7]]},
+    }
+
+
+def test_frequency_distribution_is_correct():
+    nlp = English()
+    docs = [
+        Doc(nlp.vocab, words=["Bank", "of", "China"]),
+        Doc(nlp.vocab, words=["China"]),
+    ]
+
+    expected = Counter({"china": 0.5, "bank": 0.25, "of": 0.25})
+    freq_distribution = _get_distribution(docs, normalize=True)
+    assert freq_distribution == expected
+
+
+def test_kl_divergence_computation_is_correct():
+    p = Counter({"a": 0.5, "b": 0.25})
+    q = Counter({"a": 0.25, "b": 0.50, "c": 0.15, "d": 0.10})
+    result = _get_kl_divergence(p, q)
+    expected = 0.1733
+    assert math.isclose(result, expected, rel_tol=1e-3)
+
+
+def test_get_span_characteristics_return_value():
+    nlp = English()
+    spans_key = "sc"
+
+    pred = Doc(nlp.vocab, words=["Welcome", "to", "the", "Bank", "of", "China", "."])
+    pred.spans[spans_key] = [Span(pred, 3, 6, "ORG"), Span(pred, 5, 6, "GPE")]
+    ref = Doc(nlp.vocab, words=["Welcome", "to", "the", "Bank", "of", "China", "."])
+    ref.spans[spans_key] = [Span(ref, 3, 6, "ORG"), Span(ref, 5, 6, "GPE")]
+    eg = Example(pred, ref)
+
+    examples = [eg]
+    data = _compile_gold(examples, ["spancat"], nlp, True)
+    span_characteristics = _get_span_characteristics(
+        examples=examples, compiled_gold=data, spans_key=spans_key
+    )
+
+    assert {"sd", "bd", "lengths"}.issubset(span_characteristics.keys())
+    assert span_characteristics["min_length"] == 1
+    assert span_characteristics["max_length"] == 3
+
+
+def test_ensure_print_span_characteristics_wont_fail():
+    """Test if interface between two methods aren't destroyed if refactored"""
+    nlp = English()
+    spans_key = "sc"
+
+    pred = Doc(nlp.vocab, words=["Welcome", "to", "the", "Bank", "of", "China", "."])
+    pred.spans[spans_key] = [Span(pred, 3, 6, "ORG"), Span(pred, 5, 6, "GPE")]
+    ref = Doc(nlp.vocab, words=["Welcome", "to", "the", "Bank", "of", "China", "."])
+    ref.spans[spans_key] = [Span(ref, 3, 6, "ORG"), Span(ref, 5, 6, "GPE")]
+    eg = Example(pred, ref)
+
+    examples = [eg]
+    data = _compile_gold(examples, ["spancat"], nlp, True)
+    span_characteristics = _get_span_characteristics(
+        examples=examples, compiled_gold=data, spans_key=spans_key
+    )
+    _print_span_characteristics(span_characteristics)
+
+
+@pytest.mark.parametrize("threshold", [70, 80, 85, 90, 95])
+def test_span_length_freq_dist_threshold_must_be_correct(threshold):
+    sample_span_lengths = {
+        "span_type_1": [1, 4, 4, 5],
+        "span_type_2": [5, 3, 3, 2],
+        "span_type_3": [3, 1, 3, 3],
+    }
+    span_freqs = _get_spans_length_freq_dist(sample_span_lengths, threshold)
+    assert sum(span_freqs.values()) >= threshold
+
+
+def test_span_length_freq_dist_output_must_be_correct():
+    sample_span_lengths = {
+        "span_type_1": [1, 4, 4, 5],
+        "span_type_2": [5, 3, 3, 2],
+        "span_type_3": [3, 1, 3, 3],
+    }
+    threshold = 90
+    span_freqs = _get_spans_length_freq_dist(sample_span_lengths, threshold)
+    assert sum(span_freqs.values()) >= threshold
+    assert list(span_freqs.keys()) == [3, 1, 4, 5, 2]
+
+
+def test_applycli_empty_dir():
+    with make_tempdir() as data_path:
+        output = data_path / "test.spacy"
+        apply(data_path, output, "blank:en", "text", 1, 1)
+
+
+def test_applycli_docbin():
+    with make_tempdir() as data_path:
+        output = data_path / "testout.spacy"
+        nlp = spacy.blank("en")
+        doc = nlp("testing apply cli.")
+        # test empty DocBin case
+        docbin = DocBin()
+        docbin.to_disk(data_path / "testin.spacy")
+        apply(data_path, output, "blank:en", "text", 1, 1)
+        docbin.add(doc)
+        docbin.to_disk(data_path / "testin.spacy")
+        apply(data_path, output, "blank:en", "text", 1, 1)
+
+
+def test_applycli_jsonl():
+    with make_tempdir() as data_path:
+        output = data_path / "testout.spacy"
+        data = [{"field": "Testing apply cli.", "key": 234}]
+        data2 = [{"field": "234"}]
+        srsly.write_jsonl(data_path / "test.jsonl", data)
+        apply(data_path, output, "blank:en", "field", 1, 1)
+        srsly.write_jsonl(data_path / "test2.jsonl", data2)
+        apply(data_path, output, "blank:en", "field", 1, 1)
+
+
+def test_applycli_txt():
+    with make_tempdir() as data_path:
+        output = data_path / "testout.spacy"
+        with open(data_path / "test.foo", "w") as ftest:
+            ftest.write("Testing apply cli.")
+        apply(data_path, output, "blank:en", "text", 1, 1)
+
+
+def test_applycli_mixed():
+    with make_tempdir() as data_path:
+        output = data_path / "testout.spacy"
+        text = "Testing apply cli"
+        nlp = spacy.blank("en")
+        doc = nlp(text)
+        jsonl_data = [{"text": text}]
+        srsly.write_jsonl(data_path / "test.jsonl", jsonl_data)
+        docbin = DocBin()
+        docbin.add(doc)
+        docbin.to_disk(data_path / "testin.spacy")
+        with open(data_path / "test.txt", "w") as ftest:
+            ftest.write(text)
+        apply(data_path, output, "blank:en", "text", 1, 1)
+        # Check whether it worked
+        result = list(DocBin().from_disk(output).get_docs(nlp.vocab))
+        assert len(result) == 3
+        for doc in result:
+            assert doc.text == text
+
+
+def test_applycli_user_data():
+    Doc.set_extension("ext", default=0)
+    val = ("ext", 0)
+    with make_tempdir() as data_path:
+        output = data_path / "testout.spacy"
+        nlp = spacy.blank("en")
+        doc = nlp("testing apply cli.")
+        doc._.ext = val
+        docbin = DocBin(store_user_data=True)
+        docbin.add(doc)
+        docbin.to_disk(data_path / "testin.spacy")
+        apply(data_path, output, "blank:en", "", 1, 1)
+        result = list(DocBin().from_disk(output).get_docs(nlp.vocab))
+        assert result[0]._.ext == val
+
+
+def test_local_remote_storage():
+    with make_tempdir() as d:
+        filename = "a.txt"
+
+        content_hashes = ("aaaa", "cccc", "bbbb")
+        for i, content_hash in enumerate(content_hashes):
+            # make sure that each subsequent file has a later timestamp
+            if i > 0:
+                time.sleep(1)
+            content = f"{content_hash} content"
+            loc_file = d / "root" / filename
+            if not loc_file.parent.exists():
+                loc_file.parent.mkdir(parents=True)
+            with loc_file.open(mode="w") as file_:
+                file_.write(content)
+
+            # push first version to remote storage
+            remote = RemoteStorage(d / "root", str(d / "remote"))
+            remote.push(filename, "aaaa", content_hash)
+
+            # retrieve with full hashes
+            loc_file.unlink()
+            remote.pull(filename, command_hash="aaaa", content_hash=content_hash)
+            with loc_file.open(mode="r") as file_:
+                assert file_.read() == content
+
+            # retrieve with command hash
+            loc_file.unlink()
+            remote.pull(filename, command_hash="aaaa")
+            with loc_file.open(mode="r") as file_:
+                assert file_.read() == content
+
+            # retrieve with content hash
+            loc_file.unlink()
+            remote.pull(filename, content_hash=content_hash)
+            with loc_file.open(mode="r") as file_:
+                assert file_.read() == content
+
+            # retrieve with no hashes
+            loc_file.unlink()
+            remote.pull(filename)
+            with loc_file.open(mode="r") as file_:
+                assert file_.read() == content
+
+
+def test_local_remote_storage_pull_missing():
+    # pulling from a non-existent remote pulls nothing gracefully
+    with make_tempdir() as d:
+        filename = "a.txt"
+        remote = RemoteStorage(d / "root", str(d / "remote"))
+        assert remote.pull(filename, command_hash="aaaa") is None
+        assert remote.pull(filename) is None
+
+
+def test_cli_find_threshold(capsys):
+    def make_examples(nlp: Language) -> List[Example]:
+        docs: List[Example] = []
+
+        for t in [
+            (
+                "I am angry and confused in the Bank of America.",
+                {
+                    "cats": {"ANGRY": 1.0, "CONFUSED": 1.0, "HAPPY": 0.0},
+                    "spans": {"sc": [(31, 46, "ORG")]},
+                },
+            ),
+            (
+                "I am confused but happy in New York.",
+                {
+                    "cats": {"ANGRY": 0.0, "CONFUSED": 1.0, "HAPPY": 1.0},
+                    "spans": {"sc": [(27, 35, "GPE")]},
+                },
+            ),
+        ]:
+            doc = nlp.make_doc(t[0])
+            docs.append(Example.from_dict(doc, t[1]))
+
+        return docs
+
+    def init_nlp(
+        components: Tuple[Tuple[str, Dict[str, Any]], ...] = ()
+    ) -> Tuple[Language, List[Example]]:
+        new_nlp = English()
+        new_nlp.add_pipe(  # type: ignore
+            factory_name="textcat_multilabel",
+            name="tc_multi",
+            config={"threshold": 0.9},
+        )
+
+        # Append additional components to pipeline.
+        for cfn, comp_config in components:
+            new_nlp.add_pipe(cfn, config=comp_config)
+
+        new_examples = make_examples(new_nlp)
+        new_nlp.initialize(get_examples=lambda: new_examples)
+        for i in range(5):
+            new_nlp.update(new_examples)
+
+        return new_nlp, new_examples
+
+    with make_tempdir() as docs_dir:
+        # Check whether find_threshold() identifies lowest threshold above 0 as (first) ideal threshold, as this matches
+        # the current model behavior with the examples above. This can break once the model behavior changes and serves
+        # mostly as a smoke test.
+        nlp, examples = init_nlp()
+        DocBin(docs=[example.reference for example in examples]).to_disk(
+            docs_dir / "docs.spacy"
+        )
+        with make_tempdir() as nlp_dir:
+            nlp.to_disk(nlp_dir)
+            best_threshold, best_score, res = find_threshold(
+                model=nlp_dir,
+                data_path=docs_dir / "docs.spacy",
+                pipe_name="tc_multi",
+                threshold_key="threshold",
+                scores_key="cats_macro_f",
+                silent=True,
+            )
+            assert best_score == max(res.values())
+            assert res[1.0] == 0.0
+
+        # Test with spancat.
+        nlp, _ = init_nlp((("spancat", {}),))
+        with make_tempdir() as nlp_dir:
+            nlp.to_disk(nlp_dir)
+            best_threshold, best_score, res = find_threshold(
+                model=nlp_dir,
+                data_path=docs_dir / "docs.spacy",
+                pipe_name="spancat",
+                threshold_key="threshold",
+                scores_key="spans_sc_f",
+                silent=True,
+            )
+            assert best_score == max(res.values())
+            assert res[1.0] == 0.0
+
+        # Having multiple textcat_multilabel components should work, since the name has to be specified.
+        nlp, _ = init_nlp((("textcat_multilabel", {}),))
+        with make_tempdir() as nlp_dir:
+            nlp.to_disk(nlp_dir)
+            assert find_threshold(
+                model=nlp_dir,
+                data_path=docs_dir / "docs.spacy",
+                pipe_name="tc_multi",
+                threshold_key="threshold",
+                scores_key="cats_macro_f",
+                silent=True,
+            )
+
+        # Specifying the name of an non-existing pipe should fail.
+        nlp, _ = init_nlp()
+        with make_tempdir() as nlp_dir:
+            nlp.to_disk(nlp_dir)
+            with pytest.raises(AttributeError):
+                find_threshold(
+                    model=nlp_dir,
+                    data_path=docs_dir / "docs.spacy",
+                    pipe_name="_",
+                    threshold_key="threshold",
+                    scores_key="cats_macro_f",
+                    silent=True,
+                )
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.parametrize(
+    "reqs,output",
+    [
+        [
+            """
+            spacy
+
+            # comment
+
+            thinc""",
+            (False, False),
+        ],
+        [
+            """# comment
+            --some-flag
+            spacy""",
+            (False, False),
+        ],
+        [
+            """# comment
+            --some-flag
+            spacy; python_version >= '3.6'""",
+            (False, False),
+        ],
+        [
+            """# comment
+             spacyunknowndoesnotexist12345""",
+            (True, False),
+        ],
+    ],
+)
+def test_project_check_requirements(reqs, output):
+    import pkg_resources
+
+    # excessive guard against unlikely package name
+    try:
+        pkg_resources.require("spacyunknowndoesnotexist12345")
+    except pkg_resources.DistributionNotFound:
+        assert output == _check_requirements([req.strip() for req in reqs.split("\n")])
+
+
+def test_upload_download_local_file():
+    with make_tempdir() as d1, make_tempdir() as d2:
+        filename = "f.txt"
+        content = "content"
+        local_file = d1 / filename
+        remote_file = d2 / filename
+        with local_file.open(mode="w") as file_:
+            file_.write(content)
+        upload_file(local_file, remote_file)
+        local_file.unlink()
+        download_file(remote_file, local_file)
+        with local_file.open(mode="r") as file_:
+            assert file_.read() == content
+
+
+def test_walk_directory():
+    with make_tempdir() as d:
+        files = [
+            "data1.iob",
+            "data2.iob",
+            "data3.json",
+            "data4.conll",
+            "data5.conll",
+            "data6.conll",
+            "data7.txt",
+        ]
+
+        for f in files:
+            Path(d / f).touch()
+
+        assert (len(walk_directory(d))) == 7
+        assert (len(walk_directory(d, suffix=None))) == 7
+        assert (len(walk_directory(d, suffix="json"))) == 1
+        assert (len(walk_directory(d, suffix="iob"))) == 2
+        assert (len(walk_directory(d, suffix="conll"))) == 3
+        assert (len(walk_directory(d, suffix="pdf"))) == 0
+
+
+def test_debug_data_trainable_lemmatizer_basic():
+    examples = [
+        ("She likes green eggs", {"lemmas": ["she", "like", "green", "egg"]}),
+        ("Eat blue ham", {"lemmas": ["eat", "blue", "ham"]}),
+    ]
+    nlp = Language()
+    train_examples = []
+    for t in examples:
+        train_examples.append(Example.from_dict(nlp.make_doc(t[0]), t[1]))
+
+    data = _compile_gold(train_examples, ["trainable_lemmatizer"], nlp, True)
+    # ref test_edit_tree_lemmatizer::test_initialize_from_labels
+    # this results in 4 trees
+    assert len(data["lemmatizer_trees"]) == 4
+
+
+def test_debug_data_trainable_lemmatizer_partial():
+    partial_examples = [
+        # partial annotation
+        ("She likes green eggs", {"lemmas": ["", "like", "green", ""]}),
+        # misaligned partial annotation
+        (
+            "He hates green eggs",
+            {
+                "words": ["He", "hat", "es", "green", "eggs"],
+                "lemmas": ["", "hat", "e", "green", ""],
+            },
+        ),
+    ]
+    nlp = Language()
+    train_examples = []
+    for t in partial_examples:
+        train_examples.append(Example.from_dict(nlp.make_doc(t[0]), t[1]))
+
+    data = _compile_gold(train_examples, ["trainable_lemmatizer"], nlp, True)
+    assert data["partial_lemma_annotations"] == 2
+
+
+def test_debug_data_trainable_lemmatizer_low_cardinality():
+    low_cardinality_examples = [
+        ("She likes green eggs", {"lemmas": ["no", "no", "no", "no"]}),
+        ("Eat blue ham", {"lemmas": ["no", "no", "no"]}),
+    ]
+    nlp = Language()
+    train_examples = []
+    for t in low_cardinality_examples:
+        train_examples.append(Example.from_dict(nlp.make_doc(t[0]), t[1]))
+
+    data = _compile_gold(train_examples, ["trainable_lemmatizer"], nlp, True)
+    assert data["n_low_cardinality_lemmas"] == 2
+
+
+def test_debug_data_trainable_lemmatizer_not_annotated():
+    unannotated_examples = [
+        ("She likes green eggs", {}),
+        ("Eat blue ham", {}),
+    ]
+    nlp = Language()
+    train_examples = []
+    for t in unannotated_examples:
+        train_examples.append(Example.from_dict(nlp.make_doc(t[0]), t[1]))
+
+    data = _compile_gold(train_examples, ["trainable_lemmatizer"], nlp, True)
+    assert data["no_lemma_annotations"] == 2

@@ -1,7 +1,8 @@
 import pytest
 from mock import Mock
+
 from spacy.matcher import Matcher
-from spacy.tokens import Doc, Token, Span
+from spacy.tokens import Doc, Span, Token
 
 from ..doc.test_underscore import clean_underscore  # noqa: F401
 
@@ -50,8 +51,6 @@ def test_matcher_from_usage_docs(en_vocab):
 
     def label_sentiment(matcher, doc, i, matches):
         match_id, start, end = matches[i]
-        if doc.vocab.strings[match_id] == "HAPPY":
-            doc.sentiment += 0.1
         span = doc[start:end]
         with doc.retokenize() as retokenizer:
             retokenizer.merge(span)
@@ -61,7 +60,6 @@ def test_matcher_from_usage_docs(en_vocab):
     matcher = Matcher(en_vocab)
     matcher.add("HAPPY", pos_patterns, on_match=label_sentiment)
     matcher(doc)
-    assert doc.sentiment != 0
     assert doc[1].norm_ == "happy emoji"
 
 
@@ -115,6 +113,155 @@ def test_matcher_match_multi(matcher):
     assert matcher(doc) == [
         (doc.vocab.strings["GoogleNow"], 2, 4),
         (doc.vocab.strings["Java"], 5, 6),
+    ]
+
+
+@pytest.mark.parametrize(
+    "rules,match_locs",
+    [
+        (
+            {
+                "GoogleNow": [[{"ORTH": {"FUZZY": "Google"}}, {"ORTH": "Now"}]],
+            },
+            [(2, 4)],
+        ),
+        (
+            {
+                "Java": [[{"LOWER": {"FUZZY": "java"}}]],
+            },
+            [(5, 6)],
+        ),
+        (
+            {
+                "JS": [[{"ORTH": {"FUZZY": "JavaScript"}}]],
+                "GoogleNow": [[{"ORTH": {"FUZZY": "Google"}}, {"ORTH": "Now"}]],
+                "Java": [[{"LOWER": {"FUZZY": "java"}}]],
+            },
+            [(2, 4), (5, 6), (8, 9)],
+        ),
+        # only the second pattern matches (check that predicate keys used for
+        # caching don't collide)
+        (
+            {
+                "A": [[{"ORTH": {"FUZZY": "Javascripts"}}]],
+                "B": [[{"ORTH": {"FUZZY5": "Javascripts"}}]],
+            },
+            [(8, 9)],
+        ),
+    ],
+)
+def test_matcher_match_fuzzy(en_vocab, rules, match_locs):
+    words = ["They", "like", "Goggle", "Now", "and", "Jav", "but", "not", "JvvaScrpt"]
+    doc = Doc(en_vocab, words=words)
+
+    matcher = Matcher(en_vocab)
+    for key, patterns in rules.items():
+        matcher.add(key, patterns)
+    assert match_locs == [(start, end) for m_id, start, end in matcher(doc)]
+
+
+@pytest.mark.parametrize("set_op", ["IN", "NOT_IN"])
+def test_matcher_match_fuzzy_set_op_longest(en_vocab, set_op):
+    rules = {
+        "GoogleNow": [[{"ORTH": {"FUZZY": {set_op: ["Google", "Now"]}}, "OP": "+"}]]
+    }
+    matcher = Matcher(en_vocab)
+    for key, patterns in rules.items():
+        matcher.add(key, patterns, greedy="LONGEST")
+
+    words = ["They", "like", "Goggle", "Noo"]
+    doc = Doc(en_vocab, words=words)
+    assert len(matcher(doc)) == 1
+
+
+def test_matcher_match_fuzzy_set_multiple(en_vocab):
+    rules = {
+        "GoogleNow": [
+            [
+                {
+                    "ORTH": {"FUZZY": {"IN": ["Google", "Now"]}, "NOT_IN": ["Goggle"]},
+                    "OP": "+",
+                }
+            ]
+        ]
+    }
+    matcher = Matcher(en_vocab)
+    for key, patterns in rules.items():
+        matcher.add(key, patterns, greedy="LONGEST")
+
+    words = ["They", "like", "Goggle", "Noo"]
+    doc = Doc(matcher.vocab, words=words)
+    assert matcher(doc) == [
+        (doc.vocab.strings["GoogleNow"], 3, 4),
+    ]
+
+
+@pytest.mark.parametrize("fuzzyn", range(1, 10))
+def test_matcher_match_fuzzyn_all_insertions(en_vocab, fuzzyn):
+    matcher = Matcher(en_vocab)
+    matcher.add("GoogleNow", [[{"ORTH": {f"FUZZY{fuzzyn}": "GoogleNow"}}]])
+    # words with increasing edit distance
+    words = ["GoogleNow" + "a" * i for i in range(0, 10)]
+    doc = Doc(en_vocab, words)
+    assert len(matcher(doc)) == fuzzyn + 1
+
+
+@pytest.mark.parametrize("fuzzyn", range(1, 6))
+def test_matcher_match_fuzzyn_various_edits(en_vocab, fuzzyn):
+    matcher = Matcher(en_vocab)
+    matcher.add("GoogleNow", [[{"ORTH": {f"FUZZY{fuzzyn}": "GoogleNow"}}]])
+    # words with increasing edit distance of different edit types
+    words = [
+        "GoogleNow",
+        "GoogleNuw",
+        "GoogleNuew",
+        "GoogleNoweee",
+        "GiggleNuw3",
+        "gouggle5New",
+    ]
+    doc = Doc(en_vocab, words)
+    assert len(matcher(doc)) == fuzzyn + 1
+
+
+@pytest.mark.parametrize("greedy", ["FIRST", "LONGEST"])
+@pytest.mark.parametrize("set_op", ["IN", "NOT_IN"])
+def test_matcher_match_fuzzyn_set_op_longest(en_vocab, greedy, set_op):
+    rules = {
+        "GoogleNow": [[{"ORTH": {"FUZZY2": {set_op: ["Google", "Now"]}}, "OP": "+"}]]
+    }
+    matcher = Matcher(en_vocab)
+    for key, patterns in rules.items():
+        matcher.add(key, patterns, greedy=greedy)
+
+    words = ["They", "like", "Goggle", "Noo"]
+    doc = Doc(matcher.vocab, words=words)
+    spans = matcher(doc, as_spans=True)
+    assert len(spans) == 1
+    if set_op == "IN":
+        assert spans[0].text == "Goggle Noo"
+    else:
+        assert spans[0].text == "They like"
+
+
+def test_matcher_match_fuzzyn_set_multiple(en_vocab):
+    rules = {
+        "GoogleNow": [
+            [
+                {
+                    "ORTH": {"FUZZY1": {"IN": ["Google", "Now"]}, "NOT_IN": ["Goggle"]},
+                    "OP": "+",
+                }
+            ]
+        ]
+    }
+    matcher = Matcher(en_vocab)
+    for key, patterns in rules.items():
+        matcher.add(key, patterns, greedy="LONGEST")
+
+    words = ["They", "like", "Goggle", "Noo"]
+    doc = Doc(matcher.vocab, words=words)
+    assert matcher(doc) == [
+        (doc.vocab.strings["GoogleNow"], 3, 4),
     ]
 
 
@@ -368,6 +515,16 @@ def test_matcher_intersect_value_operator(en_vocab):
     doc[0]._.ext = ["A", "B"]
     assert len(matcher(doc)) == 1
 
+    # INTERSECTS matches nothing for iterables that aren't all str or int
+    matcher = Matcher(en_vocab)
+    pattern = [{"_": {"ext": {"INTERSECTS": ["Abx", "C"]}}}]
+    matcher.add("M", [pattern])
+    doc = Doc(en_vocab, words=["a", "b", "c"])
+    doc[0]._.ext = [["Abx"], "B"]
+    assert len(matcher(doc)) == 0
+    doc[0]._.ext = ["Abx", "B"]
+    assert len(matcher(doc)) == 1
+
     # INTERSECTS with an empty pattern list matches nothing
     matcher = Matcher(en_vocab)
     pattern = [{"_": {"ext": {"INTERSECTS": []}}}]
@@ -427,6 +584,30 @@ def test_matcher_regex(en_vocab):
     assert len(matches) == 0
 
 
+def test_matcher_regex_set_in(en_vocab):
+    matcher = Matcher(en_vocab)
+    pattern = [{"ORTH": {"REGEX": {"IN": [r"(?:a)", r"(?:an)"]}}}]
+    matcher.add("A_OR_AN", [pattern])
+    doc = Doc(en_vocab, words=["an", "a", "hi"])
+    matches = matcher(doc)
+    assert len(matches) == 2
+    doc = Doc(en_vocab, words=["bye"])
+    matches = matcher(doc)
+    assert len(matches) == 0
+
+
+def test_matcher_regex_set_not_in(en_vocab):
+    matcher = Matcher(en_vocab)
+    pattern = [{"ORTH": {"REGEX": {"NOT_IN": [r"(?:a)", r"(?:an)"]}}}]
+    matcher.add("A_OR_AN", [pattern])
+    doc = Doc(en_vocab, words=["an", "a", "hi"])
+    matches = matcher(doc)
+    assert len(matches) == 1
+    doc = Doc(en_vocab, words=["bye"])
+    matches = matcher(doc)
+    assert len(matches) == 1
+
+
 def test_matcher_regex_shape(en_vocab):
     matcher = Matcher(en_vocab)
     pattern = [{"SHAPE": {"REGEX": r"^[^x]+$"}}]
@@ -474,6 +655,25 @@ def test_matcher_extension_set_membership(en_vocab):
     doc = Doc(en_vocab, words=["aardvark"])
     matches = matcher(doc)
     assert len(matches) == 0
+
+
+def test_matcher_extension_in_set_predicate(en_vocab):
+    matcher = Matcher(en_vocab)
+    Token.set_extension("ext", default=[])
+    pattern = [{"_": {"ext": {"IN": ["A", "C"]}}}]
+    matcher.add("M", [pattern])
+    doc = Doc(en_vocab, words=["a", "b", "c"])
+
+    # The IN predicate expects an exact match between the
+    # extension value and one of the pattern's values.
+    doc[0]._.ext = ["A", "B"]
+    assert len(matcher(doc)) == 0
+
+    doc[0]._.ext = ["A"]
+    assert len(matcher(doc)) == 0
+
+    doc[0]._.ext = "A"
+    assert len(matcher(doc)) == 1
 
 
 def test_matcher_basic_check(en_vocab):
@@ -591,9 +791,16 @@ def test_matcher_span(matcher):
     doc = Doc(matcher.vocab, words=text.split())
     span_js = doc[:3]
     span_java = doc[4:]
-    assert len(matcher(doc)) == 2
-    assert len(matcher(span_js)) == 1
-    assert len(matcher(span_java)) == 1
+    doc_matches = matcher(doc)
+    span_js_matches = matcher(span_js)
+    span_java_matches = matcher(span_java)
+    assert len(doc_matches) == 2
+    assert len(span_js_matches) == 1
+    assert len(span_java_matches) == 1
+
+    # match offsets always refer to the doc
+    assert doc_matches[0] == span_js_matches[0]
+    assert doc_matches[1] == span_java_matches[0]
 
 
 def test_matcher_as_spans(matcher):
@@ -642,3 +849,65 @@ def test_matcher_no_zero_length(en_vocab):
     matcher = Matcher(en_vocab)
     matcher.add("TEST", [[{"TAG": "C", "OP": "?"}]])
     assert len(matcher(doc)) == 0
+
+
+def test_matcher_ent_iob_key(en_vocab):
+    """Test that patterns with ent_iob works correctly."""
+    matcher = Matcher(en_vocab)
+    matcher.add("Rule", [[{"ENT_IOB": "I"}]])
+    doc1 = Doc(en_vocab, words=["I", "visited", "New", "York", "and", "California"])
+    doc1.ents = [Span(doc1, 2, 4, label="GPE"), Span(doc1, 5, 6, label="GPE")]
+    doc2 = Doc(en_vocab, words=["I", "visited", "my", "friend", "Alicia"])
+    doc2.ents = [Span(doc2, 4, 5, label="PERSON")]
+    matches1 = [doc1[start:end].text for _, start, end in matcher(doc1)]
+    matches2 = [doc2[start:end].text for _, start, end in matcher(doc2)]
+    assert len(matches1) == 1
+    assert matches1[0] == "York"
+    assert len(matches2) == 0
+
+    matcher = Matcher(en_vocab)  # Test iob pattern with operators
+    matcher.add("Rule", [[{"ENT_IOB": "I", "OP": "+"}]])
+    doc = Doc(
+        en_vocab, words=["I", "visited", "my", "friend", "Anna", "Maria", "Esperanza"]
+    )
+    doc.ents = [Span(doc, 4, 7, label="PERSON")]
+    matches = [doc[start:end].text for _, start, end in matcher(doc)]
+    assert len(matches) == 3
+    assert matches[0] == "Maria"
+    assert matches[1] == "Maria Esperanza"
+    assert matches[2] == "Esperanza"
+
+
+def test_matcher_min_max_operator(en_vocab):
+    # Exactly n matches {n}
+    doc = Doc(
+        en_vocab,
+        words=["foo", "bar", "foo", "foo", "bar", "foo", "foo", "foo", "bar", "bar"],
+    )
+    matcher = Matcher(en_vocab)
+    pattern = [{"ORTH": "foo", "OP": "{3}"}]
+    matcher.add("TEST", [pattern])
+
+    matches1 = [doc[start:end].text for _, start, end in matcher(doc)]
+    assert len(matches1) == 1
+
+    # At least n matches {n,}
+    matcher = Matcher(en_vocab)
+    pattern = [{"ORTH": "foo", "OP": "{2,}"}]
+    matcher.add("TEST", [pattern])
+    matches2 = [doc[start:end].text for _, start, end in matcher(doc)]
+    assert len(matches2) == 4
+
+    # At most m matches {,m}
+    matcher = Matcher(en_vocab)
+    pattern = [{"ORTH": "foo", "OP": "{,2}"}]
+    matcher.add("TEST", [pattern])
+    matches3 = [doc[start:end].text for _, start, end in matcher(doc)]
+    assert len(matches3) == 9
+
+    # At least n matches and most m matches {n,m}
+    matcher = Matcher(en_vocab)
+    pattern = [{"ORTH": "foo", "OP": "{2,3}"}]
+    matcher.add("TEST", [pattern])
+    matches4 = [doc[start:end].text for _, start, end in matcher(doc)]
+    assert len(matches4) == 4

@@ -1,26 +1,23 @@
 # cython: infer_types=True, profile=True, binding=True
 from itertools import islice
-from typing import Optional, Callable
+from typing import Callable, Iterable, Optional
 
-import srsly
-from thinc.api import Model, SequenceCategoricalCrossentropy, Config
+from thinc.api import Config, Model
+from thinc.legacy import LegacySequenceCategoricalCrossentropy
 
 from ..tokens.doc cimport Doc
 
-from .tagger import Tagger
-from ..language import Language
+from .. import util
 from ..errors import Errors
+from ..language import Language
 from ..scorer import Scorer
 from ..training import validate_examples, validate_get_examples
 from ..util import registry
-from .. import util
-
-# See #9050
-BACKWARD_OVERWRITE = False
+from .tagger import ActivationsT, Tagger
 
 default_model_config = """
 [model]
-@architectures = "spacy.Tagger.v1"
+@architectures = "spacy.Tagger.v2"
 
 [model.tok2vec]
 @architectures = "spacy.HashEmbedCNN.v2"
@@ -38,11 +35,21 @@ DEFAULT_SENTER_MODEL = Config().from_str(default_model_config)["model"]
 @Language.factory(
     "senter",
     assigns=["token.is_sent_start"],
-    default_config={"model": DEFAULT_SENTER_MODEL, "overwrite": False, "scorer": {"@scorers": "spacy.senter_scorer.v1"}},
+    default_config={
+        "model": DEFAULT_SENTER_MODEL,
+        "overwrite": False,
+        "scorer": {"@scorers": "spacy.senter_scorer.v1"},
+        "save_activations": False,
+    },
     default_score_weights={"sents_f": 1.0, "sents_p": 0.0, "sents_r": 0.0},
 )
-def make_senter(nlp: Language, name: str, model: Model, overwrite: bool, scorer: Optional[Callable]):
-    return SentenceRecognizer(nlp.vocab, model, name, overwrite=overwrite, scorer=scorer)
+def make_senter(nlp: Language,
+                name: str,
+                model: Model,
+                overwrite: bool,
+                scorer: Optional[Callable],
+                save_activations: bool):
+    return SentenceRecognizer(nlp.vocab, model, name, overwrite=overwrite, scorer=scorer, save_activations=save_activations)
 
 
 def senter_score(examples, **kwargs):
@@ -70,8 +77,9 @@ class SentenceRecognizer(Tagger):
         model,
         name="senter",
         *,
-        overwrite=BACKWARD_OVERWRITE,
+        overwrite=False,
         scorer=senter_score,
+        save_activations: bool = False,
     ):
         """Initialize a sentence recognizer.
 
@@ -79,8 +87,10 @@ class SentenceRecognizer(Tagger):
         model (thinc.api.Model): The Thinc Model powering the pipeline component.
         name (str): The component instance name, used to add entries to the
             losses during training.
+        overwrite (bool): Whether to overwrite existing annotations.
         scorer (Optional[Callable]): The scoring method. Defaults to
             Scorer.score_spans for the attribute "sents".
+        save_activations (bool): save model activations in Doc when annotating.
 
         DOCS: https://spacy.io/api/sentencerecognizer#init
         """
@@ -90,6 +100,7 @@ class SentenceRecognizer(Tagger):
         self._rehearsal_model = None
         self.cfg = {"overwrite": overwrite}
         self.scorer = scorer
+        self.save_activations = save_activations
 
     @property
     def labels(self):
@@ -100,22 +111,31 @@ class SentenceRecognizer(Tagger):
         return tuple(["I", "S"])
 
     @property
+    def hide_labels(self):
+        return True
+
+    @property
     def label_data(self):
         return None
 
-    def set_annotations(self, docs, batch_tag_ids):
+    def set_annotations(self, docs: Iterable[Doc], activations: ActivationsT):
         """Modify a batch of documents, using pre-computed scores.
 
         docs (Iterable[Doc]): The documents to modify.
-        batch_tag_ids: The IDs to set, produced by SentenceRecognizer.predict.
+        activations (ActivationsT): The activations used for setting annotations, produced by SentenceRecognizer.predict.
 
         DOCS: https://spacy.io/api/sentencerecognizer#set_annotations
         """
+        batch_tag_ids = activations["label_ids"]
         if isinstance(docs, Doc):
             docs = [docs]
         cdef Doc doc
         cdef bint overwrite = self.cfg["overwrite"]
         for i, doc in enumerate(docs):
+            if self.save_activations:
+                doc.activations[self.name] = {}
+                for act_name, acts in activations.items():
+                    doc.activations[self.name][act_name] = acts[i]
             doc_tag_ids = batch_tag_ids[i]
             if hasattr(doc_tag_ids, "get"):
                 doc_tag_ids = doc_tag_ids.get()
@@ -138,7 +158,7 @@ class SentenceRecognizer(Tagger):
         """
         validate_examples(examples, "SentenceRecognizer.get_loss")
         labels = self.labels
-        loss_func = SequenceCategoricalCrossentropy(names=labels, normalize=False)
+        loss_func = LegacySequenceCategoricalCrossentropy(names=labels, normalize=False)
         truths = []
         for eg in examples:
             eg_truth = []

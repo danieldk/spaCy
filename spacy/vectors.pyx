@@ -1,24 +1,25 @@
-cimport numpy as np
-from libc.stdint cimport uint32_t
 from cython.operator cimport dereference as deref
+from libc.stdint cimport uint32_t, uint64_t
 from libcpp.set cimport set as cppset
 from murmurhash.mrmr cimport hash128_x64
 
-import functools
-import numpy
-from typing import cast
 import warnings
 from enum import Enum
+from typing import cast
+
+import numpy
 import srsly
-from thinc.api import get_array_module, get_current_ops
+from thinc.api import Ops, get_array_module, get_current_ops
 from thinc.backends import get_array_ops
 from thinc.types import Floats2d
 
+from .attrs cimport ORTH, attr_id_t
 from .strings cimport StringStore
 
-from .strings import get_string_id
-from .errors import Errors, Warnings
 from . import util
+from .attrs import IDS
+from .errors import Errors, Warnings
+from .strings import get_string_id
 
 
 def unpickle_vectors(bytes_data):
@@ -52,7 +53,6 @@ cdef class Vectors:
     DOCS: https://spacy.io/api/vectors
     """
     cdef public object strings
-    cdef public object name
     cdef readonly object mode
     cdef public object data
     cdef public object key2row
@@ -63,15 +63,15 @@ cdef class Vectors:
     cdef readonly uint32_t hash_seed
     cdef readonly unicode bow
     cdef readonly unicode eow
+    cdef readonly attr_id_t attr
 
-    def __init__(self, *, strings=None, shape=None, data=None, keys=None, name=None, mode=Mode.default, minn=0, maxn=0, hash_count=1, hash_seed=0, bow="<", eow=">"):
+    def __init__(self, *, strings=None, shape=None, data=None, keys=None, mode=Mode.default, minn=0, maxn=0, hash_count=1, hash_seed=0, bow="<", eow=">", attr="ORTH"):
         """Create a new vector store.
 
         strings (StringStore): The string store.
         shape (tuple): Size of the table, as (# entries, # columns)
         data (numpy.ndarray or cupy.ndarray): The vector data.
         keys (iterable): A sequence of keys, aligned with the data.
-        name (str): A name to identify the vectors table.
         mode (str): Vectors mode: "default" or "floret" (default: "default").
         minn (int): The floret char ngram minn (default: 0).
         maxn (int): The floret char ngram maxn (default: 0).
@@ -79,13 +79,14 @@ cdef class Vectors:
         hash_seed (int): The floret hash seed (default: 0).
         bow (str): The floret BOW string (default: "<").
         eow (str): The floret EOW string (default: ">").
+        attr (Union[int, str]): The token attribute for the vector keys
+            (default: "ORTH").
 
         DOCS: https://spacy.io/api/vectors#init
         """
         self.strings = strings
         if self.strings is None:
             self.strings = StringStore()
-        self.name = name
         if mode not in Mode.values():
             raise ValueError(
                 Errors.E202.format(
@@ -102,10 +103,18 @@ cdef class Vectors:
         self.hash_seed = hash_seed
         self.bow = bow
         self.eow = eow
+        if isinstance(attr, (int, long)):
+            self.attr = attr
+        else:
+            attr = attr.upper()
+            if attr == "TEXT":
+                attr = "ORTH"
+            self.attr = IDS.get(attr, ORTH)
+
         if self.mode == Mode.default:
             if data is None:
                 if shape is None:
-                    shape = (0,0)
+                    shape = (0, 0)
                 ops = get_current_ops()
                 data = ops.xp.zeros(shape, dtype="f")
                 self._unset = cppset[int]({i for i in range(data.shape[0])})
@@ -146,7 +155,7 @@ cdef class Vectors:
 
         DOCS: https://spacy.io/api/vectors#size
         """
-        return self.data.shape[0] * self.data.shape[1]
+        return self.data.size
 
     @property
     def is_full(self):
@@ -170,6 +179,8 @@ cdef class Vectors:
 
         DOCS: https://spacy.io/api/vectors#n_keys
         """
+        if self.mode == Mode.floret:
+            return -1
         return len(self.key2row)
 
     def __reduce__(self):
@@ -241,6 +252,14 @@ cdef class Vectors:
         else:
             return key in self.key2row
 
+    def __eq__(self, other):
+        # Check for equality, with faster checks first
+        return (
+            self.shape == other.shape
+            and self.key2row == other.key2row
+            and self.to_bytes(exclude=["strings"]) == other.to_bytes(exclude=["strings"])
+        )
+
     def resize(self, shape, inplace=False):
         """Resize the underlying vectors array. If inplace=True, the memory
         is reallocated. This may cause other references to the data to become
@@ -274,7 +293,7 @@ cdef class Vectors:
             self.data = resized_array
         self._sync_unset()
         removed_items = []
-        for key, row in list(self.key2row.items()):
+        for key, row in self.key2row.copy().items():
             if row >= shape[0]:
                 self.key2row.pop(key)
                 removed_items.append((key, row))
@@ -334,10 +353,10 @@ cdef class Vectors:
         xp = get_array_module(self.data)
         if key is not None:
             key = get_string_id(key)
-            return self.key2row.get(key, -1)
+            return self.key2row.get(int(key), -1)
         elif keys is not None:
             keys = [get_string_id(key) for key in keys]
-            rows = [self.key2row.get(key, -1.) for key in keys]
+            rows = [self.key2row.get(int(key), -1) for key in keys]
             return xp.asarray(rows, dtype="i")
         else:
             row2key = {row: key for key, row in self.key2row.items()}
@@ -353,12 +372,18 @@ cdef class Vectors:
         key (str): The string key.
         RETURNS: A list of the integer hashes.
         """
-        cdef uint32_t[4] out
+        # MurmurHash3_x64_128 returns an array of 2 uint64_t values.
+        cdef uint64_t[2] out
         chars = s.encode("utf8")
         cdef char* utf8_string = chars
         hash128_x64(utf8_string, len(chars), self.hash_seed, &out)
-        rows = [out[i] for i in range(min(self.hash_count, 4))]
-        return rows
+        rows = [
+            out[0] & 0xffffffffu,
+            out[0] >> 32,
+            out[1] & 0xffffffffu,
+            out[1] >> 32,
+        ]
+        return rows[:min(self.hash_count, 4)]
 
     def _get_ngrams(self, unicode key):
         """Get all padded ngram strings using the ngram settings.
@@ -489,11 +514,12 @@ cdef class Vectors:
             # vectors e.g. (10000, 300)
             # sims    e.g. (1024, 10000)
             sims = xp.dot(batch, vectors.T)
-            best_rows[i:i+batch_size] = xp.argpartition(sims, -n, axis=1)[:,-n:]
-            scores[i:i+batch_size] = xp.partition(sims, -n, axis=1)[:,-n:]
+            best_rows[i:i+batch_size] = xp.argpartition(sims, -n, axis=1)[:, -n:]
+            scores[i:i+batch_size] = xp.partition(sims, -n, axis=1)[:, -n:]
 
             if sort and n >= 2:
-                sorted_index = xp.arange(scores.shape[0])[:,None][i:i+batch_size],xp.argsort(scores[i:i+batch_size], axis=1)[:,::-1]
+                sorted_index = xp.arange(scores.shape[0])[:, None][i:i+batch_size], \
+                    xp.argsort(scores[i:i+batch_size], axis=1)[:, ::-1]
                 scores[i:i+batch_size] = scores[sorted_index]
                 best_rows[i:i+batch_size] = best_rows[sorted_index]
 
@@ -507,9 +533,16 @@ cdef class Vectors:
 
         numpy_rows = get_current_ops().to_numpy(best_rows)
         keys = xp.asarray(
-            [[row2key[row] for row in numpy_rows[i] if row in row2key]
-                    for i in range(len(queries)) ], dtype="uint64")
+            [
+                [row2key[row] for row in numpy_rows[i] if row in row2key]
+                for i in range(len(queries))
+            ],
+            dtype="uint64"
+        )
         return (keys, best_rows, scores)
+
+    def to_ops(self, ops: Ops):
+        self.data = ops.asarray(self.data)
 
     def _get_cfg(self):
         if self.mode == Mode.default:
@@ -525,6 +558,7 @@ cdef class Vectors:
                 "hash_seed": self.hash_seed,
                 "bow": self.bow,
                 "eow": self.eow,
+                "attr": self.attr,
             }
 
     def _set_cfg(self, cfg):
@@ -535,6 +569,7 @@ cdef class Vectors:
         self.hash_seed = cfg.get("hash_seed", 0)
         self.bow = cfg.get("bow", "<")
         self.eow = cfg.get("eow", ">")
+        self.attr = cfg.get("attr", ORTH)
 
     def to_disk(self, path, *, exclude=tuple()):
         """Save the current state to a directory.
@@ -546,16 +581,17 @@ cdef class Vectors:
         """
         xp = get_array_module(self.data)
         if xp is numpy:
-            save_array = lambda arr, file_: xp.save(file_, arr, allow_pickle=False)
+            save_array = lambda arr, file_: xp.save(file_, arr, allow_pickle=False)  # no-cython-lint
         else:
-            save_array = lambda arr, file_: xp.save(file_, arr)
+            save_array = lambda arr, file_: xp.save(file_, arr)  # no-cython-lint
 
         def save_vectors(path):
             # the source of numpy.save indicates that the file object is closed after use.
             # but it seems that somehow this does not happen, as ResourceWarnings are raised here.
             # in order to not rely on this, wrap in context manager.
+            ops = get_current_ops()
             with path.open("wb") as _file:
-                save_array(self.data, _file)
+                save_array(ops.to_numpy(self.data, byte_order="<"), _file)
 
         serializers = {
             "strings": lambda p: self.strings.to_disk(p.with_suffix(".json")),
@@ -591,6 +627,7 @@ cdef class Vectors:
             ops = get_current_ops()
             if path.exists():
                 self.data = ops.xp.load(str(path))
+            self.to_ops(ops)
 
         def load_settings(path):
             if path.exists():
@@ -620,7 +657,8 @@ cdef class Vectors:
             if hasattr(self.data, "to_bytes"):
                 return self.data.to_bytes()
             else:
-                return srsly.msgpack_dumps(self.data)
+                ops = get_current_ops()
+                return srsly.msgpack_dumps(ops.to_numpy(self.data, byte_order="<"))
 
         serializers = {
             "strings": lambda: self.strings.to_bytes(),
@@ -645,6 +683,8 @@ cdef class Vectors:
             else:
                 xp = get_array_module(self.data)
                 self.data = xp.asarray(srsly.msgpack_loads(b))
+                ops = get_current_ops()
+                self.to_ops(ops)
 
         deserializers = {
             "strings": lambda b: self.strings.from_bytes(b),

@@ -1,13 +1,20 @@
-from typing import Optional, Sequence
-import requests
 import sys
-from wasabi import msg
-import typer
+from typing import Optional, Sequence
 
-from ._util import app, Arg, Opt, WHEEL_SUFFIX, SDIST_SUFFIX
+import requests
+import typer
+from wasabi import msg
+
 from .. import about
-from ..util import is_package, get_minor_version, run_command
-from ..errors import OLD_MODEL_SHORTCUTS
+from ..util import (
+    get_installed_models,
+    get_minor_version,
+    get_package_version,
+    is_package,
+    is_prerelease_version,
+    run_command,
+)
+from ._util import SDIST_SUFFIX, WHEEL_SUFFIX, Arg, Opt, app
 
 
 @app.command(
@@ -19,7 +26,7 @@ def download_cli(
     ctx: typer.Context,
     model: str = Arg(..., help="Name of pipeline package to download"),
     direct: bool = Opt(False, "--direct", "-d", "-D", help="Force direct download of name + version"),
-    sdist: bool = Opt(False, "--sdist", "-S", help="Download sdist (.tar.gz) archive instead of pre-built binary wheel")
+    sdist: bool = Opt(False, "--sdist", "-S", help="Download sdist (.tar.gz) archive instead of pre-built binary wheel"),
     # fmt: on
 ):
     """
@@ -35,7 +42,12 @@ def download_cli(
     download(model, direct, sdist, *ctx.args)
 
 
-def download(model: str, direct: bool = False, sdist: bool = False, *pip_args) -> None:
+def download(
+    model: str,
+    direct: bool = False,
+    sdist: bool = False,
+    *pip_args,
+) -> None:
     if (
         not (is_package("spacy") or is_package("spacy-nightly"))
         and "--no-deps" not in pip_args
@@ -49,32 +61,44 @@ def download(model: str, direct: bool = False, sdist: bool = False, *pip_args) -
             "dependencies, you'll have to install them manually."
         )
         pip_args = pip_args + ("--no-deps",)
-    suffix = SDIST_SUFFIX if sdist else WHEEL_SUFFIX
-    dl_tpl = "{m}-{v}/{m}-{v}{s}#egg={m}=={v}"
     if direct:
         components = model.split("-")
         model_name = "".join(components[:-1])
         version = components[-1]
-        download_model(dl_tpl.format(m=model_name, v=version, s=suffix), pip_args)
     else:
         model_name = model
-        if model in OLD_MODEL_SHORTCUTS:
-            msg.warn(
-                f"As of spaCy v3.0, shortcuts like '{model}' are deprecated. Please "
-                f"use the full pipeline package name '{OLD_MODEL_SHORTCUTS[model]}' instead."
-            )
-            model_name = OLD_MODEL_SHORTCUTS[model]
         compatibility = get_compatibility()
         version = get_version(model_name, compatibility)
-        download_model(dl_tpl.format(m=model_name, v=version, s=suffix), pip_args)
+
+    # If we already have this version installed, skip downloading
+    installed = get_installed_models()
+    if model_name in installed:
+        installed_version = get_package_version(model_name)
+        if installed_version == version:
+            msg.warn(f"{model_name} v{version} already installed, skipping")
+            return
+
+    filename = get_model_filename(model_name, version, sdist)
+
+    download_model(filename, pip_args)
     msg.good(
         "Download and installation successful",
         f"You can now load the package via spacy.load('{model_name}')",
     )
 
 
+def get_model_filename(model_name: str, version: str, sdist: bool = False) -> str:
+    dl_tpl = "{m}-{v}/{m}-{v}{s}"
+    suffix = SDIST_SUFFIX if sdist else WHEEL_SUFFIX
+    filename = dl_tpl.format(m=model_name, v=version, s=suffix)
+    return filename
+
+
 def get_compatibility() -> dict:
-    version = get_minor_version(about.__version__)
+    if is_prerelease_version(about.__version__):
+        version: Optional[str] = about.__version__
+    else:
+        version = get_minor_version(about.__version__)
     r = requests.get(about.__compatibility__)
     if r.status_code != 200:
         msg.fail(
@@ -99,6 +123,11 @@ def get_version(model: str, comp: dict) -> str:
             exits=1,
         )
     return comp[model][0]
+
+
+def get_latest_version(model: str) -> str:
+    comp = get_compatibility()
+    return get_version(model, comp)
 
 
 def download_model(

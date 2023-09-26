@@ -1,10 +1,20 @@
-from typing import TYPE_CHECKING
-from typing import Optional, Any, Iterable, Dict, Callable, Sequence, List
-from .compat import Protocol, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Protocol,
+    Sequence,
+    runtime_checkable,
+)
 
-from thinc.api import Optimizer, Model
+from thinc.api import Model, Optimizer
 
 if TYPE_CHECKING:
+    from .language import Language
     from .training import Example
 
 
@@ -28,11 +38,30 @@ class TrainableComponent(Protocol):
 
 
 @runtime_checkable
+class DistillableComponent(Protocol):
+    is_distillable: bool
+
+    def distill(
+        self,
+        teacher_pipe: Optional[TrainableComponent],
+        examples: Iterable["Example"],
+        *,
+        drop: float = 0.0,
+        sgd: Optional[Optimizer] = None,
+        losses: Optional[Dict[str, float]] = None
+    ) -> Dict[str, float]:
+        ...
+
+    def finish_update(self, sgd: Optimizer) -> None:
+        ...
+
+
+@runtime_checkable
 class InitializableComponent(Protocol):
     def initialize(
         self,
         get_examples: Callable[[], Iterable["Example"]],
-        nlp: Iterable["Example"],
+        nlp: "Language",
         **kwargs: Any
     ):
         ...

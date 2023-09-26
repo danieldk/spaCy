@@ -1,29 +1,26 @@
 # cython: embedsignature=True, profile=True, binding=True
+cimport cython
+from cymem.cymem cimport Pool
 from cython.operator cimport dereference as deref
 from cython.operator cimport preincrement as preinc
 from libc.string cimport memcpy, memset
 from libcpp.set cimport set as stdset
-from cymem.cymem cimport Pool
 from preshed.maps cimport PreshMap
-cimport cython
 
 import re
-import warnings
 
-from .tokens.doc cimport Doc
-from .strings cimport hash_string
 from .lexeme cimport EMPTY_LEXEME
+from .strings cimport hash_string
+from .tokens.doc cimport Doc
 
-from .attrs import intify_attrs
-from .symbols import ORTH, NORM
-from .errors import Errors, Warnings
 from . import util
-from .util import registry, get_words_and_spaces
 from .attrs import intify_attrs
-from .symbols import ORTH
+from .errors import Errors
 from .scorer import Scorer
-from .training import validate_examples
+from .symbols import NORM, ORTH
 from .tokens import Span
+from .training import validate_examples
+from .util import get_words_and_spaces
 
 
 cdef class Tokenizer:
@@ -34,7 +31,7 @@ cdef class Tokenizer:
     """
     def __init__(self, Vocab vocab, rules=None, prefix_search=None,
                  suffix_search=None, infix_finditer=None, token_match=None,
-                 url_match=None):
+                 url_match=None, faster_heuristics=True):
         """Create a `Tokenizer`, to create `Doc` objects given unicode text.
 
         vocab (Vocab): A storage container for lexical types.
@@ -43,12 +40,17 @@ cdef class Tokenizer:
             `re.compile(string).search` to match prefixes.
         suffix_search (callable): A function matching the signature of
             `re.compile(string).search` to match suffixes.
-        `infix_finditer` (callable): A function matching the signature of
+        infix_finditer (callable): A function matching the signature of
             `re.compile(string).finditer` to find infixes.
-        token_match (callable): A boolean function matching strings to be
+        token_match (callable): A function matching the signature of
+            `re.compile(string).match`, for matching strings to be
             recognized as tokens.
-        url_match (callable): A boolean function matching strings to be
-            recognized as tokens after considering prefixes and suffixes.
+        url_match (callable): A function matching the signature of
+            `re.compile(string).match`, for matching strings to be
+            recognized as urls.
+        faster_heuristics (bool): Whether to restrict the final
+            Matcher-based pass for rules to those containing affixes or space.
+            Defaults to True.
 
         EXAMPLE:
             >>> tokenizer = Tokenizer(nlp.vocab)
@@ -64,6 +66,7 @@ cdef class Tokenizer:
         self.suffix_search = suffix_search
         self.infix_finditer = infix_finditer
         self.vocab = vocab
+        self.faster_heuristics = faster_heuristics
         self._rules = {}
         self._special_matcher = PhraseMatcher(self.vocab)
         self._load_special_cases(rules)
@@ -119,6 +122,14 @@ cdef class Tokenizer:
             self._cache = PreshMap()
             self._specials = PreshMap()
             self._load_special_cases(rules)
+
+    property faster_heuristics:
+        def __get__(self):
+            return self._faster_heuristics
+
+        def __set__(self, faster_heuristics):
+            self._faster_heuristics = faster_heuristics
+            self._reload_special_cases()
 
     def __reduce__(self):
         args = (self.vocab,
@@ -285,7 +296,7 @@ cdef class Tokenizer:
         spans = [doc[match.start:match.end] for match in filtered]
         cdef bint modify_in_place = True
         cdef int curr_length = doc.length
-        cdef int max_length
+        cdef int max_length = 0
         cdef int span_length_diff = 0
         span_data = {}
         for span in spans:
@@ -312,7 +323,7 @@ cdef class Tokenizer:
         cdef int span_start
         cdef int span_end
         while i < doc.length:
-            if not i in span_data:
+            if i not in span_data:
                 tokens[i + offset] = doc.c[i]
                 i += 1
             else:
@@ -376,19 +387,21 @@ cdef class Tokenizer:
         cdef vector[LexemeC*] suffixes
         cdef int orig_size
         orig_size = tokens.length
-        span = self._split_affixes(tokens.mem, span, &prefixes, &suffixes,
+        span = self._split_affixes(span, &prefixes, &suffixes,
                                    has_special, with_special_cases)
         self._attach_tokens(tokens, span, &prefixes, &suffixes, has_special,
                             with_special_cases)
         self._save_cached(&tokens.c[orig_size], orig_key, has_special,
                           tokens.length - orig_size)
 
-    cdef str _split_affixes(self, Pool mem, str string,
-                                vector[const LexemeC*] *prefixes,
-                                vector[const LexemeC*] *suffixes,
-                                int* has_special,
-                                bint with_special_cases):
-        cdef size_t i
+    cdef str _split_affixes(
+        self,
+        str string,
+        vector[const LexemeC*] *prefixes,
+        vector[const LexemeC*] *suffixes,
+        int* has_special,
+        bint with_special_cases
+    ):
         cdef str prefix
         cdef str suffix
         cdef str minus_pre
@@ -406,7 +419,7 @@ cdef class Tokenizer:
                 minus_pre = string[pre_len:]
                 if minus_pre and with_special_cases and self._specials.get(hash_string(minus_pre)) != NULL:
                     string = minus_pre
-                    prefixes.push_back(self.vocab.get(mem, prefix))
+                    prefixes.push_back(self.vocab.get(prefix))
                     break
             suf_len = self.find_suffix(string[pre_len:])
             if suf_len != 0:
@@ -414,18 +427,18 @@ cdef class Tokenizer:
                 minus_suf = string[:-suf_len]
                 if minus_suf and with_special_cases and self._specials.get(hash_string(minus_suf)) != NULL:
                     string = minus_suf
-                    suffixes.push_back(self.vocab.get(mem, suffix))
+                    suffixes.push_back(self.vocab.get(suffix))
                     break
             if pre_len and suf_len and (pre_len + suf_len) <= len(string):
                 string = string[pre_len:-suf_len]
-                prefixes.push_back(self.vocab.get(mem, prefix))
-                suffixes.push_back(self.vocab.get(mem, suffix))
+                prefixes.push_back(self.vocab.get(prefix))
+                suffixes.push_back(self.vocab.get(suffix))
             elif pre_len:
                 string = minus_pre
-                prefixes.push_back(self.vocab.get(mem, prefix))
+                prefixes.push_back(self.vocab.get(prefix))
             elif suf_len:
                 string = minus_suf
-                suffixes.push_back(self.vocab.get(mem, suffix))
+                suffixes.push_back(self.vocab.get(suffix))
         return string
 
     cdef int _attach_tokens(self, Doc tokens, str string,
@@ -433,10 +446,6 @@ cdef class Tokenizer:
                             vector[const LexemeC*] *suffixes,
                             int* has_special,
                             bint with_special_cases) except -1:
-        cdef bint specials_hit = 0
-        cdef bint cache_hit = 0
-        cdef int split, end
-        cdef const LexemeC* const* lexemes
         cdef const LexemeC* lexeme
         cdef str span
         cdef int i
@@ -446,17 +455,19 @@ cdef class Tokenizer:
         if string:
             if self._try_specials_and_cache(hash_string(string), tokens, has_special, with_special_cases):
                 pass
-            elif (self.token_match and self.token_match(string)) or \
-                    (self.url_match and \
-                    self.url_match(string)):
+            elif (
+                (self.token_match and self.token_match(string)) or
+                (self.url_match and self.url_match(string))
+            ):
+
                 # We're always saying 'no' to spaces here -- the caller will
                 # fix up the outermost one, with reference to the original.
                 # See Issue #859
-                tokens.push_back(self.vocab.get(tokens.mem, string), False)
+                tokens.push_back(self.vocab.get(string), False)
             else:
                 matches = self.find_infix(string)
                 if not matches:
-                    tokens.push_back(self.vocab.get(tokens.mem, string), False)
+                    tokens.push_back(self.vocab.get(string), False)
                 else:
                     # Let's say we have dyn-o-mite-dave - the regex finds the
                     # start and end positions of the hyphens
@@ -471,7 +482,7 @@ cdef class Tokenizer:
 
                         if infix_start != start:
                             span = string[start:infix_start]
-                            tokens.push_back(self.vocab.get(tokens.mem, span), False)
+                            tokens.push_back(self.vocab.get(span), False)
 
                         if infix_start != infix_end:
                             # If infix_start != infix_end, it means the infix
@@ -479,11 +490,11 @@ cdef class Tokenizer:
                             # for tokenization in some languages (see
                             # https://github.com/explosion/spaCy/issues/768)
                             infix_span = string[infix_start:infix_end]
-                            tokens.push_back(self.vocab.get(tokens.mem, infix_span), False)
+                            tokens.push_back(self.vocab.get(infix_span), False)
                         start = infix_end
                     span = string[start:]
                     if span:
-                        tokens.push_back(self.vocab.get(tokens.mem, span), False)
+                        tokens.push_back(self.vocab.get(span), False)
         cdef vector[const LexemeC*].reverse_iterator it = suffixes.rbegin()
         while it != suffixes.rend():
             lexeme = deref(it)
@@ -568,7 +579,7 @@ cdef class Tokenizer:
         substrings (iterable): A sequence of dicts, where each dict describes
             a token and its attributes.
         """
-        attrs = [intify_attrs(spec, _do_deprecated=True) for spec in substrings]
+        attrs = [intify_attrs(spec) for spec in substrings]
         orth = "".join([spec[ORTH] for spec in attrs])
         if chunk != orth:
             raise ValueError(Errors.E997.format(chunk=chunk, orth=orth, token_attrs=substrings))
@@ -600,8 +611,8 @@ cdef class Tokenizer:
             self.mem.free(stale_special)
         self._rules[string] = substrings
         self._flush_cache()
-        if self.find_prefix(string) or self.find_infix(string) or self.find_suffix(string) or " " in string:
-            self._special_matcher.add(string, None, self._tokenize_affixes(string, False))
+        if not self.faster_heuristics or self.find_prefix(string) or self.find_infix(string) or self.find_suffix(string) or " " in string:
+            self._special_matcher.add(string, [self._tokenize_affixes(string, False)])
 
     def _reload_special_cases(self):
         self._flush_cache()
@@ -636,11 +647,15 @@ cdef class Tokenizer:
             url_match = re.compile("a^").match
         special_cases = {}
         for orth, special_tokens in self.rules.items():
-            special_cases[orth] = [intify_attrs(special_token, strings_map=self.vocab.strings, _do_deprecated=True) for special_token in special_tokens]
+            special_cases[orth] = [intify_attrs(special_token, strings_map=self.vocab.strings) for special_token in special_tokens]
         tokens = []
         for substring in text.split():
             suffixes = []
             while substring:
+                if substring in special_cases:
+                    tokens.extend(("SPECIAL-" + str(i + 1), self.vocab.strings[e[ORTH]]) for i, e in enumerate(special_cases[substring]))
+                    substring = ''
+                    continue
                 while prefix_search(substring) or suffix_search(substring):
                     if token_match(substring):
                         tokens.append(("TOKEN_MATCH", substring))
@@ -681,6 +696,8 @@ cdef class Tokenizer:
                     infixes = infix_finditer(substring)
                     offset = 0
                     for match in infixes:
+                        if offset == 0 and match.start() == 0:
+                            continue
                         if substring[offset : match.start()]:
                             tokens.append(("TOKEN", substring[offset : match.start()]))
                         if substring[match.start() : match.end()]:
@@ -769,7 +786,8 @@ cdef class Tokenizer:
             "infix_finditer": lambda: _get_regex_pattern(self.infix_finditer),
             "token_match": lambda: _get_regex_pattern(self.token_match),
             "url_match": lambda: _get_regex_pattern(self.url_match),
-            "exceptions": lambda: dict(sorted(self._rules.items()))
+            "exceptions": lambda: dict(sorted(self._rules.items())),
+            "faster_heuristics": lambda: self.faster_heuristics,
         }
         return util.to_bytes(serializers, exclude)
 
@@ -790,7 +808,8 @@ cdef class Tokenizer:
             "infix_finditer": lambda b: data.setdefault("infix_finditer", b),
             "token_match": lambda b: data.setdefault("token_match", b),
             "url_match": lambda b: data.setdefault("url_match", b),
-            "exceptions": lambda b: data.setdefault("rules", b)
+            "exceptions": lambda b: data.setdefault("rules", b),
+            "faster_heuristics": lambda b: data.setdefault("faster_heuristics", b),
         }
         # reset all properties and flush all caches (through rules),
         # reset rules first so that _reload_special_cases is trivial/fast as
@@ -801,7 +820,7 @@ cdef class Tokenizer:
         self.infix_finditer = None
         self.token_match = None
         self.url_match = None
-        msg = util.from_bytes(bytes_data, deserializers, exclude)
+        util.from_bytes(bytes_data, deserializers, exclude)
         if "prefix_search" in data and isinstance(data["prefix_search"], str):
             self.prefix_search = re.compile(data["prefix_search"]).search
         if "suffix_search" in data and isinstance(data["suffix_search"], str):
@@ -812,6 +831,10 @@ cdef class Tokenizer:
             self.token_match = re.compile(data["token_match"]).match
         if "url_match" in data and isinstance(data["url_match"], str):
             self.url_match = re.compile(data["url_match"]).match
+        if "faster_heuristics" in data:
+            self.faster_heuristics = data["faster_heuristics"]
+        # always load rules last so that all other settings are set before the
+        # internal tokenization for the phrase matcher
         if "rules" in data and isinstance(data["rules"], dict):
             self.rules = data["rules"]
         return self

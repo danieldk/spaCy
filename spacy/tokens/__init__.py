@@ -1,8 +1,8 @@
 from .doc import Doc
-from .token import Token
+from .doc_bin import DocBin
+from .morphanalysis import MorphAnalysis
 from .span import Span
 from .span_group import SpanGroup
-from ._serialize import DocBin
-from .morphanalysis import MorphAnalysis
+from .token import Token
 
 __all__ = ["Doc", "Token", "Span", "SpanGroup", "DocBin", "MorphAnalysis"]

@@ -1,14 +1,47 @@
 import pytest
-from spacy.language import Language
-from spacy.lang.en import English
+from pydantic import StrictInt, StrictStr
+from thinc.api import ConfigValidationError, Linear, Model
+
+import spacy
 from spacy.lang.de import German
+from spacy.lang.en import English
+from spacy.language import Language
 from spacy.pipeline.tok2vec import DEFAULT_TOK2VEC_MODEL
 from spacy.tokens import Doc
-from spacy.util import registry, SimpleFrozenDict, combine_score_weights
-from thinc.api import Model, Linear, ConfigValidationError
-from pydantic import StrictInt, StrictStr
+from spacy.util import SimpleFrozenDict, combine_score_weights, registry
 
 from ..util import make_tempdir
+
+
+@pytest.mark.issue(5137)
+def test_issue5137():
+    factory_name = "test_issue5137"
+    pipe_name = "my_component"
+
+    @Language.factory(factory_name)
+    class MyComponent:
+        def __init__(self, nlp, name=pipe_name, categories="all_categories"):
+            self.nlp = nlp
+            self.categories = categories
+            self.name = name
+
+        def __call__(self, doc):
+            pass
+
+        def to_disk(self, path, **kwargs):
+            pass
+
+        def from_disk(self, path, **cfg):
+            pass
+
+    nlp = English()
+    my_component = nlp.add_pipe(factory_name, name=pipe_name)
+    assert my_component.categories == "all_categories"
+    with make_tempdir() as tmpdir:
+        nlp.to_disk(tmpdir)
+        overrides = {"components": {pipe_name: {"categories": "my_categories"}}}
+        nlp2 = spacy.load(tmpdir, config=overrides)
+        assert nlp2.get_pipe(pipe_name).categories == "my_categories"
 
 
 def test_pipe_function_component():
@@ -86,6 +119,7 @@ def test_pipe_class_component_config():
             self.value1 = value1
             self.value2 = value2
             self.is_base = True
+            self.name = name
 
         def __call__(self, doc: Doc) -> Doc:
             return doc
@@ -108,12 +142,16 @@ def test_pipe_class_component_config():
         nlp.add_pipe(name)
     with pytest.raises(ConfigValidationError):  # invalid config
         nlp.add_pipe(name, config={"value1": "10", "value2": "hello"})
-    nlp.add_pipe(name, config={"value1": 10, "value2": "hello"})
+    with pytest.warns(UserWarning):
+        nlp.add_pipe(
+            name, config={"value1": 10, "value2": "hello", "name": "wrong_name"}
+        )
     pipe = nlp.get_pipe(name)
     assert isinstance(pipe.nlp, Language)
     assert pipe.value1 == 10
     assert pipe.value2 == "hello"
     assert pipe.is_base is True
+    assert pipe.name == name
 
     nlp_en = English()
     with pytest.raises(ConfigValidationError):  # invalid config

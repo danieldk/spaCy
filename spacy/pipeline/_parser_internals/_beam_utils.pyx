@@ -1,19 +1,21 @@
 # cython: infer_types=True
 # cython: profile=True
-cimport numpy as np
 import numpy
-from cpython.ref cimport PyObject, Py_XDECREF
-from thinc.extra.search cimport Beam
-from thinc.extra.search import MaxViolation
-from thinc.extra.search cimport MaxViolation
 
-from ...typedefs cimport hash_t, class_t
-from .transition_system cimport TransitionSystem, Transition
+from ...typedefs cimport class_t
+from .transition_system cimport Transition, TransitionSystem
+
 from ...errors import Errors
+
+from .batch cimport Batch
+from .search cimport Beam, MaxViolation
+
+from .search import MaxViolation
+
 from .stateclass cimport StateC, StateClass
 
 
-# These are passed as callbacks to thinc.search.Beam
+# These are passed as callbacks to .search.Beam
 cdef int transition_state(void* _dest, void* _src, class_t clas, void* _moves) except -1:
     dest = <StateC*>_dest
     src = <StateC*>_src
@@ -27,7 +29,7 @@ cdef int check_final_state(void* _state, void* extra_args) except -1:
     return state.is_final()
 
 
-cdef class BeamBatch(object):
+cdef class BeamBatch(Batch):
     cdef public TransitionSystem moves
     cdef public object states
     cdef public object docs
@@ -140,7 +142,6 @@ def update_beam(TransitionSystem moves, states, golds, model, int width, beam_de
     cdef MaxViolation violn
     pbeam = BeamBatch(moves, states, golds, width=width, density=beam_density)
     gbeam = BeamBatch(moves, states, golds, width=width, density=0.0)
-    cdef StateClass state
     beam_maps = []
     backprops = []
     violns = [MaxViolation() for _ in range(len(states))]

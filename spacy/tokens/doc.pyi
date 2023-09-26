@@ -1,16 +1,31 @@
-from typing import Callable, Protocol, Iterable, Iterator, Optional
-from typing import Union, Tuple, List, Dict, Any, overload
+from pathlib import Path
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Protocol,
+    Tuple,
+    Union,
+    overload,
+)
+
+import numpy as np
 from cymem.cymem import Pool
-from thinc.types import Floats1d, Floats2d, Ints2d
-from .span import Span
-from .token import Token
-from ._dict_proxies import SpanGroups
-from ._retokenize import Retokenizer
+from thinc.types import ArrayXd, Floats1d, Floats2d, Ints2d, Ragged
+
 from ..lexeme import Lexeme
 from ..vocab import Vocab
+from .retokenizer import Retokenizer
+from .span import Span
+from .span_groups import SpanGroups
+from .token import Token
 from .underscore import Underscore
-from pathlib import Path
-import numpy
+
+DOCBIN_ALL_ATTRS: Tuple[str, ...]
 
 class DocMethod(Protocol):
     def __call__(self: Doc, *args: Any, **kwargs: Any) -> Any: ...  # type: ignore[misc]
@@ -21,12 +36,12 @@ class Doc:
     spans: SpanGroups
     max_length: int
     length: int
-    sentiment: float
+    activations: Dict[str, Dict[str, Union[ArrayXd, Ragged]]]
     cats: Dict[str, float]
     user_hooks: Dict[str, Callable[..., Any]]
     user_token_hooks: Dict[str, Callable[..., Any]]
     user_span_hooks: Dict[str, Callable[..., Any]]
-    tensor: numpy.ndarray
+    tensor: np.ndarray[Any, np.dtype[np.float_]]
     user_data: Dict[str, Any]
     has_unknown_spaces: bool
     _context: Any
@@ -72,7 +87,7 @@ class Doc:
         lemmas: Optional[List[str]] = ...,
         heads: Optional[List[int]] = ...,
         deps: Optional[List[str]] = ...,
-        sent_starts: Optional[List[Union[bool, None]]] = ...,
+        sent_starts: Optional[List[Union[bool, int, None]]] = ...,
         ents: Optional[List[str]] = ...,
     ) -> None: ...
     @property
@@ -105,9 +120,11 @@ class Doc:
         start_idx: int,
         end_idx: int,
         label: Union[int, str] = ...,
+        *,
         kb_id: Union[int, str] = ...,
         vector: Optional[Floats1d] = ...,
         alignment_mode: str = ...,
+        span_id: Union[int, str] = ...,
     ) -> Span: ...
     def similarity(self, other: Union[Doc, Span, Token, Lexeme]) -> float: ...
     @property
@@ -126,12 +143,12 @@ class Doc:
         blocked: Optional[List[Span]] = ...,
         missing: Optional[List[Span]] = ...,
         outside: Optional[List[Span]] = ...,
-        default: str = ...
+        default: str = ...,
     ) -> None: ...
     @property
-    def noun_chunks(self) -> Iterator[Span]: ...
+    def noun_chunks(self) -> Tuple[Span]: ...
     @property
-    def sents(self) -> Iterator[Span]: ...
+    def sents(self) -> Tuple[Span]: ...
     @property
     def lang(self) -> int: ...
     @property
@@ -144,7 +161,7 @@ class Doc:
     ) -> Doc: ...
     def to_array(
         self, py_attr_ids: Union[int, str, List[Union[int, str]]]
-    ) -> numpy.ndarray: ...
+    ) -> np.ndarray[Any, np.dtype[np.float_]]: ...
     @staticmethod
     def from_docs(
         docs: List[Doc],
@@ -170,6 +187,9 @@ class Doc:
     def extend_tensor(self, tensor: Floats2d) -> None: ...
     def retokenize(self) -> Retokenizer: ...
     def to_json(self, underscore: Optional[List[str]] = ...) -> Dict[str, Any]: ...
+    def from_json(
+        self, doc_json: Dict[str, Any] = ..., validate: bool = False
+    ) -> Doc: ...
     def to_utf8_array(self, nr_char: int = ...) -> Ints2d: ...
     @staticmethod
     def _get_array_attrs() -> Tuple[Any]: ...

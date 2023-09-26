@@ -1,20 +1,26 @@
 # cython: profile=True, cdivision=True, infer_types=True
-from cymem.cymem cimport Pool, Address
+from cymem.cymem cimport Address, Pool
 from libc.stdint cimport int32_t
 from libcpp.vector cimport vector
 
-from collections import defaultdict, Counter
+from collections import Counter, defaultdict
 
-from ...typedefs cimport hash_t, attr_t
 from ...strings cimport hash_string
 from ...structs cimport TokenC
 from ...tokens.doc cimport Doc, set_children_from_heads
 from ...tokens.token cimport MISSING_DEP
+from ...typedefs cimport attr_t
+
+from ...training import split_bilu_label
+
 from ...training.example cimport Example
+from ._state cimport ArcC, StateC
 from .stateclass cimport StateClass
-from ._state cimport StateC, ArcC
+
 from ...errors import Errors
-from thinc.extra.search cimport Beam
+
+from .search cimport Beam
+
 
 cdef weight_t MIN_SCORE = -90000
 cdef attr_t SUBTOK_LABEL = hash_string('subtok')
@@ -62,8 +68,9 @@ cdef struct GoldParseStateC:
     weight_t pop_cost
 
 
-cdef GoldParseStateC create_gold_state(Pool mem, const StateC* state,
-        heads, labels, sent_starts) except *:
+cdef GoldParseStateC create_gold_state(
+    Pool mem, const StateC* state, heads, labels, sent_starts
+) except *:
     cdef GoldParseStateC gs
     gs.length = len(heads)
     gs.stride = 1
@@ -76,7 +83,7 @@ cdef GoldParseStateC create_gold_state(Pool mem, const StateC* state,
     gs.n_kids_in_stack = <int32_t*>mem.alloc(gs.length, sizeof(gs.n_kids_in_stack[0]))
 
     for i, is_sent_start in enumerate(sent_starts):
-        if is_sent_start == True:
+        if is_sent_start is True:
             gs.state_bits[i] = set_state_flag(
                 gs.state_bits[i],
                 IS_SENT_START,
@@ -204,6 +211,7 @@ cdef class ArcEagerGold:
     def update(self, StateClass stcls):
         update_gold_state(&self.c, stcls.c)
 
+
 def _get_aligned_sent_starts(example):
     """Get list of SENT_START attributes aligned to the predicted tokenization.
     If the reference has not sentence starts, return a list of None values.
@@ -218,7 +226,7 @@ def _get_aligned_sent_starts(example):
         sent_starts = [False] * len(example.x)
         seen_words = set()
         for y_sent in example.y.sents:
-            x_indices = list(align[y_sent.start : y_sent.end].dataXd)
+            x_indices = list(align[y_sent.start : y_sent.end])
             if any(x_idx in seen_words for x_idx in x_indices):
                 # If there are any tokens in X that align across two sentences,
                 # regard the sentence annotations as missing, as we can't
@@ -518,7 +526,6 @@ cdef class Break:
     """
     @staticmethod
     cdef bint is_valid(const StateC* st, attr_t label) nogil:
-        cdef int i
         if st.buffer_length() < 2:
             return False
         elif st.B(1) != st.B(0) + 1:
@@ -550,8 +557,8 @@ cdef class Break:
                 cost -= 1
             if gold.heads[si] == b0:
                 cost -= 1
-        if not is_sent_start(gold, state.B(1)) \
-        and not is_sent_start_unknown(gold, state.B(1)):
+        if not is_sent_start(gold, state.B(1)) and\
+                not is_sent_start_unknown(gold, state.B(1)):
             cost += 1
         return cost
 
@@ -585,7 +592,10 @@ cdef class ArcEager(TransitionSystem):
             actions[RIGHT][label] = 1
             actions[REDUCE][label] = 1
         for example in kwargs.get('examples', []):
-            heads, labels = example.get_aligned_parse(projectivize=True)
+            # use heads and labels from the reference parse (without regard to
+            # misalignments between the predicted and reference)
+            example_gold_preproc = Example(example.reference, example.reference)
+            heads, labels = example_gold_preproc.get_aligned_parse(projectivize=True)
             for child, (head, label) in enumerate(zip(heads, labels)):
                 if head is None or label is None:
                     continue
@@ -601,7 +611,7 @@ cdef class ArcEager(TransitionSystem):
                     actions[SHIFT][''] += 1
         if min_freq is not None:
             for action, label_freqs in actions.items():
-                for label, freq in list(label_freqs.items()):
+                for label, freq in label_freqs.copy().items():
                     if freq < min_freq:
                         label_freqs.pop(label)
         # Ensure these actions are present
@@ -684,7 +694,7 @@ cdef class ArcEager(TransitionSystem):
             return self.c[name_or_id]
         name = name_or_id
         if '-' in name:
-            move_str, label_str = name.split('-', 1)
+            move_str, label_str = split_bilu_label(name)
             label = self.strings[label_str]
         else:
             move_str = name
@@ -769,6 +779,8 @@ cdef class ArcEager(TransitionSystem):
         return list(arcs)
 
     def has_gold(self, Example eg, start=0, end=None):
+        if end is not None and end < 0:
+            end = None
         for word in eg.y[start:end]:
             if word.dep != 0:
                 return True
@@ -794,7 +806,6 @@ cdef class ArcEager(TransitionSystem):
             raise TypeError(Errors.E909.format(name="ArcEagerGold"))
         cdef ArcEagerGold gold_ = gold
         gold_state = gold_.c
-        n_gold = 0
         if self.c[i].is_valid(stcls.c, self.c[i].label):
             cost = self.c[i].get_cost(stcls.c, &gold_state, self.c[i].label)
         else:
@@ -821,7 +832,7 @@ cdef class ArcEager(TransitionSystem):
             for i in range(self.n_moves):
                 print(self.get_class_name(i), is_valid[i], costs[i])
             print("Gold sent starts?", is_sent_start(&gold_state, state.B(0)), is_sent_start(&gold_state, state.B(1)))
-            raise ValueError("Could not find gold transition - see logs above.")
+            raise ValueError(Errors.E1031)
 
     def get_oracle_sequence_from_state(self, StateClass state, ArcEagerGold gold, _debug=None):
         cdef int i
@@ -854,6 +865,7 @@ cdef class ArcEager(TransitionSystem):
                             state.print_state()
                         )))
                     action.do(state.c, action.label)
+                    state.c.history.push_back(i)
                     break
             else:
                 failed = False
@@ -866,7 +878,7 @@ cdef class ArcEager(TransitionSystem):
             print("Gold")
             for token in example.y:
                 print(token.i, token.text, token.dep_, token.head.text)
-            aligned_heads, aligned_labels = example.get_aligned_parse()
+            aligned_heads, _aligned_labels = example.get_aligned_parse()
             print("Aligned heads")
             for i, head in enumerate(aligned_heads):
                 print(example.x[i], example.x[head] if head is not None else "__")

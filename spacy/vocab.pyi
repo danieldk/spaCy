@@ -1,17 +1,19 @@
-from typing import Callable, Iterator, Optional, Union, List, Dict
-from typing import Any, Iterable
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Union
+
 from thinc.types import Floats1d, FloatsXd
+
 from . import Language
-from .strings import StringStore
 from .lexeme import Lexeme
 from .lookups import Lookups
 from .morphology import Morphology
+from .strings import StringStore
 from .tokens import Doc, Span
 from .vectors import Vectors
-from pathlib import Path
 
 def create_vocab(
-    lang: Optional[str], defaults: Any, vectors_name: Optional[str] = ...
+    lang: Optional[str],
+    defaults: Any,
 ) -> Vocab: ...
 
 class Vocab:
@@ -25,10 +27,9 @@ class Vocab:
     def __init__(
         self,
         lex_attr_getters: Optional[Dict[str, Callable[[str], Any]]] = ...,
-        strings: Optional[Union[List[str], StringStore]] = ...,
+        strings: Optional[StringStore] = ...,
         lookups: Optional[Lookups] = ...,
         oov_prob: float = ...,
-        vectors_name: Optional[str] = ...,
         writing_system: Dict[str, Any] = ...,
         get_noun_chunks: Optional[Callable[[Union[Doc, Span]], Iterator[Span]]] = ...,
     ) -> None: ...
@@ -46,6 +47,7 @@ class Vocab:
     def reset_vectors(
         self, *, width: Optional[int] = ..., shape: Optional[int] = ...
     ) -> None: ...
+    def deduplicate_vectors(self) -> None: ...
     def prune_vectors(self, nr_row: int, batch_size: int = ...) -> Dict[str, float]: ...
     def get_vector(
         self,
@@ -71,7 +73,6 @@ def unpickle_vocab(
     sstore: StringStore,
     vectors: Any,
     morphology: Any,
-    _unused_object: Any,
     lex_attr_getters: Any,
     lookups: Any,
     get_noun_chunks: Any,

@@ -1,15 +1,39 @@
-from typing import Any, List, Union, Optional, Dict
+from collections import OrderedDict
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
+
+import requests
 import srsly
 from preshed.bloom import BloomFilter
-from collections import OrderedDict
 
 from .errors import Errors
-from .util import SimpleFrozenDict, ensure_path, registry, load_language_data
 from .strings import get_string_id
-
+from .util import SimpleFrozenDict, ensure_path, load_language_data, logger, registry
 
 UNSET = object()
+
+
+@registry.misc("spacy.LookupsDataLoader.v1")
+def load_lookups_data(lang, tables):
+    logger.debug(f"Loading lookups from spacy-lookups-data: {tables}")
+    lookups = load_lookups(lang=lang, tables=tables)
+    return lookups
+
+
+@registry.misc("spacy.LookupsDataLoaderFromURL.v1")
+def load_lookups_data_from_url(lang, tables, url):
+    logger.debug(f"Loading lookups from {url}: {tables}")
+    lookups = Lookups()
+    for table in tables:
+        table_url = url + lang + "_" + table + ".json"
+        r = requests.get(table_url)
+        if r.status_code != 200:
+            raise ValueError(
+                Errors.E4011.format(status_code=r.status_code, url=table_url)
+            )
+        table_data = r.json()
+        lookups.add_table(table, table_data)
+    return lookups
 
 
 def load_lookups(lang: str, tables: List[str], strict: bool = True) -> "Lookups":
@@ -85,7 +109,7 @@ class Table(OrderedDict):
         value: The value to set.
         """
         key = get_string_id(key)
-        OrderedDict.__setitem__(self, key, value)
+        OrderedDict.__setitem__(self, key, value)  # type:ignore[assignment]
         self.bloom.add(key)
 
     def set(self, key: Union[str, int], value: Any) -> None:
@@ -104,7 +128,7 @@ class Table(OrderedDict):
         RETURNS: The value.
         """
         key = get_string_id(key)
-        return OrderedDict.__getitem__(self, key)
+        return OrderedDict.__getitem__(self, key)  # type:ignore[index]
 
     def get(self, key: Union[str, int], default: Optional[Any] = None) -> Any:
         """Get the value for a given key. String keys will be hashed.
@@ -114,7 +138,7 @@ class Table(OrderedDict):
         RETURNS: The value.
         """
         key = get_string_id(key)
-        return OrderedDict.get(self, key, default)
+        return OrderedDict.get(self, key, default)  # type:ignore[arg-type]
 
     def __contains__(self, key: Union[str, int]) -> bool:  # type: ignore[override]
         """Check whether a key is in the table. String keys will be hashed.

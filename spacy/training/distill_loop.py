@@ -10,7 +10,7 @@ import shutil
 
 from .loop import create_evaluation_callback, create_train_batches, subdivide_batch
 from .loop import update_meta, create_before_to_disk_callback, clean_output_dir
-from ..schemas import ConfigSchemaDistillation, ConfigSchemaTraining
+from ..schemas import ConfigSchemaDistill, ConfigSchemaTraining
 from ..util import resolve_dot_names, registry
 
 if TYPE_CHECKING:
@@ -54,7 +54,7 @@ def distill(
     if use_gpu >= 0 and allocator:
         set_gpu_allocator(allocator)
     T = registry.resolve(config["training"], schema=ConfigSchemaTraining)
-    D = registry.resolve(config["distillation"], schema=ConfigSchemaDistillation)
+    D = registry.resolve(config["distillation"], schema=ConfigSchemaDistill)
     dot_names = [D["distill_corpus"], T["dev_corpus"]]
     distill_corpus, dev_corpus = resolve_dot_names(config, dot_names)
     optimizer = T["optimizer"]

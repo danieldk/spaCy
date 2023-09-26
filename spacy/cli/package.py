@@ -1,16 +1,18 @@
-from typing import Optional, Union, Any, Dict, List, Tuple, cast
+import re
 import shutil
-from pathlib import Path
-from wasabi import Printer, MarkdownRenderer, get_raw_input
-from thinc.api import Config
-from collections import defaultdict
-import srsly
 import sys
+from collections import defaultdict
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
-from ._util import app, Arg, Opt, string_to_list, WHEEL_SUFFIX, SDIST_SUFFIX
-from ..schemas import validate, ModelMetaSchema
-from .. import util
-from .. import about
+import srsly
+from catalogue import RegistryError
+from thinc.api import Config
+from wasabi import MarkdownRenderer, Printer, get_raw_input
+
+from .. import about, util
+from ..schemas import ModelMetaSchema, validate
+from ._util import SDIST_SUFFIX, WHEEL_SUFFIX, Arg, Opt, app, string_to_list
 
 
 @app.command("package")
@@ -18,7 +20,7 @@ def package_cli(
     # fmt: off
     input_dir: Path = Arg(..., help="Directory with pipeline data", exists=True, file_okay=False),
     output_dir: Path = Arg(..., help="Output parent directory", exists=True, file_okay=False),
-    code_paths: str = Opt("", "--code", "-c", help="Comma-separated paths to Python file with additional code (registered functions) to be included in the package"),
+    code_paths: str = Opt("", "--code", "-c", help="Comma-separated paths to Python files with additional code (registered functions) to be included in the package"),
     meta_path: Optional[Path] = Opt(None, "--meta-path", "--meta", "-m", help="Path to meta.json", exists=True, dir_okay=False),
     create_meta: bool = Opt(False, "--create-meta", "-C", help="Create meta.json, even if one exists"),
     name: Optional[str] = Opt(None, "--name", "-n", help="Package name to override meta"),
@@ -108,6 +110,24 @@ def package(
             ", ".join(meta["requirements"]),
         )
     if name is not None:
+        if not name.isidentifier():
+            msg.fail(
+                f"Model name ('{name}') is not a valid module name. "
+                "This is required so it can be imported as a module.",
+                "We recommend names that use ASCII A-Z, a-z, _ (underscore), "
+                "and 0-9. "
+                "For specific details see: https://docs.python.org/3/reference/lexical_analysis.html#identifiers",
+                exits=1,
+            )
+        if not _is_permitted_package_name(name):
+            msg.fail(
+                f"Model name ('{name}') is not a permitted package name. "
+                "This is required to correctly load the model with spacy.load.",
+                "We recommend names that use ASCII A-Z, a-z, _ (underscore), "
+                "and 0-9. "
+                "For specific details see: https://www.python.org/dev/peps/pep-0426/#name",
+                exits=1,
+            )
         meta["name"] = name
     if version is not None:
         meta["version"] = version
@@ -161,7 +181,7 @@ def package(
         imports="\n".join(f"from . import {m}" for m in imports)
     )
     create_file(package_path / "__init__.py", init_py)
-    msg.good(f"Successfully created package '{model_name_v}'", main_path)
+    msg.good(f"Successfully created package directory '{model_name_v}'", main_path)
     if create_sdist:
         with util.working_dir(main_path):
             util.run_command([sys.executable, "setup.py", "sdist"], capture=False)
@@ -170,8 +190,14 @@ def package(
     if create_wheel:
         with util.working_dir(main_path):
             util.run_command([sys.executable, "setup.py", "bdist_wheel"], capture=False)
-        wheel = main_path / "dist" / f"{model_name_v}{WHEEL_SUFFIX}"
+        wheel_name_squashed = re.sub("_+", "_", model_name_v)
+        wheel = main_path / "dist" / f"{wheel_name_squashed}{WHEEL_SUFFIX}"
         msg.good(f"Successfully created binary wheel", wheel)
+    if "__" in model_name:
+        msg.warn(
+            f"Model name ('{model_name}') contains a run of underscores. "
+            "Runs of underscores are not significant in installed package names.",
+        )
 
 
 def has_wheel() -> bool:
@@ -212,12 +238,21 @@ def get_third_party_dependencies(
         if "factory" in component:
             funcs["factories"].add(component["factory"])
     modules = set()
+    lang = config["nlp"]["lang"]
     for reg_name, func_names in funcs.items():
         for func_name in func_names:
-            func_info = util.registry.find(reg_name, func_name)
+            # Try the lang-specific version and fall back
+            try:
+                func_info = util.registry.find(reg_name, lang + "." + func_name)
+            except RegistryError:
+                try:
+                    func_info = util.registry.find(reg_name, func_name)
+                except RegistryError as regerr:
+                    # lang-specific version being absent is not actually an issue
+                    raise regerr from None
             module_name = func_info.get("module")  # type: ignore[attr-defined]
             if module_name:  # the code is part of a module, not a --code file
-                modules.add(func_info["module"].split(".")[0])  # type: ignore[index]
+                modules.add(func_info["module"].split(".")[0])  # type: ignore[union-attr]
     dependencies = []
     for module_name in modules:
         if module_name in distributions:
@@ -264,8 +299,8 @@ def get_meta(
     }
     nlp = util.load_model_from_path(Path(model_path))
     meta.update(nlp.meta)
-    meta.update(existing_meta)
     meta["spacy_version"] = util.get_minor_version_range(about.__version__)
+    meta.update(existing_meta)
     meta["vectors"] = {
         "width": nlp.vocab.vectors_length,
         "vectors": len(nlp.vocab.vectors),
@@ -397,7 +432,7 @@ def _format_label_scheme(data: Dict[str, Any]) -> str:
             continue
         col1 = md.bold(md.code(pipe))
         col2 = ", ".join(
-            [md.code(label.replace("|", "\\|")) for label in labels]
+            [md.code(str(label).replace("|", "\\|")) for label in labels]
         )  # noqa: W605
         label_data.append((col1, col2))
         n_labels += len(labels)
@@ -410,6 +445,14 @@ def _format_label_scheme(data: Dict[str, Any]) -> str:
     md.add(md.table(label_data, ["Component", "Labels"]))
     md.add("</details>")
     return md.text
+
+
+def _is_permitted_package_name(package_name: str) -> bool:
+    # regex from: https://www.python.org/dev/peps/pep-0426/#name
+    permitted_match = re.search(
+        r"^([A-Z0-9]|[A-Z0-9][A-Z0-9._-]*[A-Z0-9])$", package_name, re.IGNORECASE
+    )
+    return permitted_match is not None
 
 
 TEMPLATE_SETUP = """

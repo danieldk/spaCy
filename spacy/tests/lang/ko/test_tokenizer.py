@@ -19,6 +19,8 @@ POS_TESTS = [("서울 타워 근처에 살고 있습니다.",
               "PROPN ADP VERB X NOUN ADV VERB AUX X PUNCT")]
 # fmt: on
 
+# tests for ko_tokenizer (default KoreanTokenizer)
+
 
 @pytest.mark.parametrize("text,expected_tokens", TOKENIZER_TESTS)
 def test_ko_tokenizer(ko_tokenizer, text, expected_tokens):
@@ -44,6 +46,70 @@ def test_ko_tokenizer_pos(ko_tokenizer, text, expected_pos):
     assert pos == expected_pos.split()
 
 
-def test_ko_empty_doc(ko_tokenizer):
+def test_ko_tokenizer_empty_doc(ko_tokenizer):
     tokens = ko_tokenizer("")
     assert len(tokens) == 0
+
+
+@pytest.mark.issue(10535)
+def test_ko_tokenizer_unknown_tag(ko_tokenizer):
+    tokens = ko_tokenizer("미닛 리피터")
+    assert tokens[1].pos_ == "X"
+
+
+# same tests for ko_tokenizer_natto (KoreanNattoTokenizer)
+
+
+@pytest.mark.parametrize("text,expected_tokens", TOKENIZER_TESTS)
+def test_ko_tokenizer_natto(ko_tokenizer_natto, text, expected_tokens):
+    tokens = [token.text for token in ko_tokenizer_natto(text)]
+    assert tokens == expected_tokens.split()
+
+
+@pytest.mark.parametrize("text,expected_tags", TAG_TESTS)
+def test_ko_tokenizer_natto_tags(ko_tokenizer_natto, text, expected_tags):
+    tags = [token.tag_ for token in ko_tokenizer_natto(text)]
+    assert tags == expected_tags.split()
+
+
+@pytest.mark.parametrize("text,expected_tags", FULL_TAG_TESTS)
+def test_ko_tokenizer_natto_full_tags(ko_tokenizer_natto, text, expected_tags):
+    tags = ko_tokenizer_natto(text).user_data["full_tags"]
+    assert tags == expected_tags.split()
+
+
+@pytest.mark.parametrize("text,expected_pos", POS_TESTS)
+def test_ko_tokenizer_natto_pos(ko_tokenizer_natto, text, expected_pos):
+    pos = [token.pos_ for token in ko_tokenizer_natto(text)]
+    assert pos == expected_pos.split()
+
+
+def test_ko_tokenizer_natto_empty_doc(ko_tokenizer_natto):
+    tokens = ko_tokenizer_natto("")
+    assert len(tokens) == 0
+
+
+@pytest.mark.issue(10535)
+def test_ko_tokenizer_natto_unknown_tag(ko_tokenizer_natto):
+    tokens = ko_tokenizer_natto("미닛 리피터")
+    assert tokens[1].pos_ == "X"
+
+
+# fmt: off
+SPACY_TOKENIZER_TESTS = [
+    ("있다.", "있다 ."),
+    ("'예'는", "' 예 ' 는"),
+    ("부 (富) 는", "부 ( 富 ) 는"),
+    ("부(富)는", "부 ( 富 ) 는"),
+    ("1982~1983.", "1982 ~ 1983 ."),
+    ("사과·배·복숭아·수박은 모두 과일이다.", "사과 · 배 · 복숭아 · 수박은 모두 과일이다 ."),
+    ("그렇구나~", "그렇구나~"),
+    ("『9시 반의 당구』,", "『 9시 반의 당구 』 ,"),
+]
+# fmt: on
+
+
+@pytest.mark.parametrize("text,expected_tokens", SPACY_TOKENIZER_TESTS)
+def test_ko_spacy_tokenizer(ko_tokenizer_tokenizer, text, expected_tokens):
+    tokens = [token.text for token in ko_tokenizer_tokenizer(text)]
+    assert tokens == expected_tokens.split()

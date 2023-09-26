@@ -1,7 +1,8 @@
 import pytest
 
+from spacy.lang.ja import DetailedToken, Japanese
+
 from ...tokenizer.test_naughty_strings import NAUGHTY_STRINGS
-from spacy.lang.ja import Japanese, DetailedToken
 
 # fmt: off
 TOKENIZER_TESTS = [
@@ -52,6 +53,18 @@ SUB_TOKEN_TESTS = [
     ("選挙管理委員会", [None, None, [tokens1]], [[tokens2, tokens3]])
 ]
 # fmt: on
+
+
+@pytest.mark.issue(2901)
+def test_issue2901():
+    """Test that `nlp` doesn't fail."""
+    try:
+        nlp = Japanese()
+    except ImportError:
+        pytest.skip()
+
+    doc = nlp("pythonが大好きです")
+    assert doc
 
 
 @pytest.mark.parametrize("text,expected_tokens", TOKENIZER_TESTS)

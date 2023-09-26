@@ -1,9 +1,10 @@
-from spacy.pipeline.ner import DEFAULT_NER_MODEL
-from spacy.training import Example
-from spacy.pipeline import EntityRecognizer
-from spacy.tokens import Span, Doc
-from spacy import registry
 import pytest
+
+from spacy import registry
+from spacy.pipeline import EntityRecognizer
+from spacy.pipeline.ner import DEFAULT_NER_MODEL
+from spacy.tokens import Doc, Span
+from spacy.training import Example
 
 
 def _ner_example(ner):
@@ -43,6 +44,33 @@ def test_ents_reset(en_vocab):
     orig_iobs = [t.ent_iob_ for t in doc]
     doc.ents = list(doc.ents)
     assert [t.ent_iob_ for t in doc] == orig_iobs
+
+
+def test_ents_clear(en_vocab):
+    """Ensure that removing entities clears token attributes"""
+    text = ["Louisiana", "Office", "of", "Conservation"]
+    doc = Doc(en_vocab, words=text)
+    entity = Span(doc, 0, 4, label=391, span_id="TEST")
+    doc.ents = [entity]
+    doc.ents = []
+    for token in doc:
+        assert token.ent_iob == 2
+        assert token.ent_type == 0
+        assert token.ent_id == 0
+        assert token.ent_kb_id == 0
+    doc.ents = [entity]
+    doc.set_ents([], default="missing")
+    for token in doc:
+        assert token.ent_iob == 0
+        assert token.ent_type == 0
+        assert token.ent_id == 0
+        assert token.ent_kb_id == 0
+    doc.set_ents([], default="blocked")
+    for token in doc:
+        assert token.ent_iob == 3
+        assert token.ent_type == 0
+        assert token.ent_id == 0
+        assert token.ent_kb_id == 0
 
 
 def test_add_overlapping_entities(en_vocab):

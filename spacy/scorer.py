@@ -1,13 +1,23 @@
-from typing import Optional, Iterable, Dict, Set, List, Any, Callable, Tuple
-from typing import TYPE_CHECKING
-import numpy as np
 from collections import defaultdict
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Set,
+    Tuple,
+)
 
-from .training import Example
-from .tokens import Token, Doc, Span
+import numpy as np
+
 from .errors import Errors
-from .util import get_lang_class, SimpleFrozenList
 from .morphology import Morphology
+from .tokens import Doc, Span, Token
+from .training import Example
+from .util import SimpleFrozenList, get_lang_class
 
 if TYPE_CHECKING:
     # This lets us add type hints for mypy etc. without causing circular imports
@@ -104,7 +114,7 @@ class Scorer:
     def __init__(
         self,
         nlp: Optional["Language"] = None,
-        default_lang: str = "xx",
+        default_lang: str = "mul",
         default_pipeline: Iterable[str] = DEFAULT_PIPELINE,
         **cfg,
     ) -> None:
@@ -121,20 +131,30 @@ class Scorer:
                 nlp.add_pipe(pipe)
             self.nlp = nlp
 
-    def score(self, examples: Iterable[Example]) -> Dict[str, Any]:
+    def score(
+        self, examples: Iterable[Example], *, per_component: bool = False
+    ) -> Dict[str, Any]:
         """Evaluate a list of Examples.
 
         examples (Iterable[Example]): The predicted annotations + correct annotations.
+        per_component (bool): Whether to return the scores keyed by component
+            name. Defaults to False.
         RETURNS (Dict): A dictionary of scores.
 
         DOCS: https://spacy.io/api/scorer#score
         """
         scores = {}
         if hasattr(self.nlp.tokenizer, "score"):
-            scores.update(self.nlp.tokenizer.score(examples, **self.cfg))  # type: ignore
+            if per_component:
+                scores["tokenizer"] = self.nlp.tokenizer.score(examples, **self.cfg)
+            else:
+                scores.update(self.nlp.tokenizer.score(examples, **self.cfg))  # type: ignore
         for name, component in self.nlp.pipeline:
             if hasattr(component, "score"):
-                scores.update(component.score(examples, **self.cfg))
+                if per_component:
+                    scores[name] = component.score(examples, **self.cfg)
+                else:
+                    scores.update(component.score(examples, **self.cfg))
         return scores
 
     @staticmethod
@@ -174,7 +194,7 @@ class Scorer:
             prf_score.score_set(pred_spans, gold_spans)
         if len(acc_score) > 0:
             return {
-                "token_acc": acc_score.fscore,
+                "token_acc": acc_score.precision,
                 "token_p": prf_score.precision,
                 "token_r": prf_score.recall,
                 "token_f": prf_score.fscore,
@@ -228,7 +248,7 @@ class Scorer:
                 if token.orth_.isspace():
                     continue
                 if align.x2y.lengths[token.i] == 1:
-                    gold_i = align.x2y[token.i].dataXd[0, 0]
+                    gold_i = align.x2y[token.i][0]
                     if gold_i not in missing_indices:
                         pred_tags.add((gold_i, getter(token, attr)))
             tag_score.score_set(pred_tags, gold_tags)
@@ -287,7 +307,7 @@ class Scorer:
                 if token.orth_.isspace():
                     continue
                 if align.x2y.lengths[token.i] == 1:
-                    gold_i = align.x2y[token.i].dataXd[0, 0]
+                    gold_i = align.x2y[token.i][0]
                     if gold_i not in missing_indices:
                         value = getter(token, attr)
                         morph = gold_doc.vocab.strings[value]
@@ -359,14 +379,15 @@ class Scorer:
             pred_doc = example.predicted
             gold_doc = example.reference
             # Option to handle docs without annotation for this attribute
-            if has_annotation is not None:
-                if not has_annotation(gold_doc):
-                    continue
-            # Find all labels in gold and doc
-            labels = set(
-                [k.label_ for k in getter(gold_doc, attr)]
-                + [k.label_ for k in getter(pred_doc, attr)]
-            )
+            if has_annotation is not None and not has_annotation(gold_doc):
+                continue
+            # Find all labels in gold
+            labels = set([k.label_ for k in getter(gold_doc, attr)])
+            # If labeled, find all labels in pred
+            if has_annotation is None or (
+                has_annotation is not None and has_annotation(pred_doc)
+            ):
+                labels |= set([k.label_ for k in getter(pred_doc, attr)])
             # Set up all labels for per type scoring and prepare gold per type
             gold_per_type: Dict[str, Set] = {label: set() for label in labels}
             for label in labels:
@@ -384,16 +405,19 @@ class Scorer:
                 gold_spans.add(gold_span)
                 gold_per_type[span.label_].add(gold_span)
             pred_per_type: Dict[str, Set] = {label: set() for label in labels}
-            for span in example.get_aligned_spans_x2y(
-                getter(pred_doc, attr), allow_overlap
+            if has_annotation is None or (
+                has_annotation is not None and has_annotation(pred_doc)
             ):
-                pred_span: Tuple
-                if labeled:
-                    pred_span = (span.label_, span.start, span.end - 1)
-                else:
-                    pred_span = (span.start, span.end - 1)
-                pred_spans.add(pred_span)
-                pred_per_type[span.label_].add(pred_span)
+                for span in example.get_aligned_spans_x2y(
+                    getter(pred_doc, attr), allow_overlap
+                ):
+                    pred_span: Tuple
+                    if labeled:
+                        pred_span = (span.label_, span.start, span.end - 1)
+                    else:
+                        pred_span = (span.start, span.end - 1)
+                    pred_spans.add(pred_span)
+                    pred_per_type[span.label_].add(pred_span)
             # Scores per label
             if labeled:
                 for k, v in score_per_type.items():
@@ -441,7 +465,8 @@ class Scorer:
             getter(doc, attr) should return the values for the individual doc.
         labels (Iterable[str]): The set of possible labels. Defaults to [].
         multi_label (bool): Whether the attribute allows multiple labels.
-            Defaults to True.
+            Defaults to True. When set to False (exclusive labels), missing
+            gold labels are interpreted as 0.0 and the threshold is set to 0.0.
         positive_label (str): The positive label for a binary task with
             exclusive classes. Defaults to None.
         threshold (float): Cutoff to consider a prediction "positive". Defaults
@@ -466,27 +491,29 @@ class Scorer:
         """
         if threshold is None:
             threshold = 0.5 if multi_label else 0.0
+        if not multi_label:
+            threshold = 0.0
         f_per_type = {label: PRFScore() for label in labels}
         auc_per_type = {label: ROCAUCScore() for label in labels}
         labels = set(labels)
-        if labels:
-            for eg in examples:
-                labels.update(eg.predicted.cats.keys())
-                labels.update(eg.reference.cats.keys())
         for example in examples:
             # Through this loop, None in the gold_cats indicates missing label.
             pred_cats = getter(example.predicted, attr)
+            pred_cats = {k: v for k, v in pred_cats.items() if k in labels}
             gold_cats = getter(example.reference, attr)
+            gold_cats = {k: v for k, v in gold_cats.items() if k in labels}
 
             for label in labels:
                 pred_score = pred_cats.get(label, 0.0)
-                gold_score = gold_cats.get(label, 0.0)
+                gold_score = gold_cats.get(label)
+                if not gold_score and not multi_label:
+                    gold_score = 0.0
                 if gold_score is not None:
                     auc_per_type[label].score_set(pred_score, gold_score)
             if multi_label:
                 for label in labels:
                     pred_score = pred_cats.get(label, 0.0)
-                    gold_score = gold_cats.get(label, 0.0)
+                    gold_score = gold_cats.get(label)
                     if gold_score is not None:
                         if pred_score >= threshold and gold_score > 0:
                             f_per_type[label].tp += 1
@@ -498,21 +525,18 @@ class Scorer:
                 # Get the highest-scoring for each.
                 pred_label, pred_score = max(pred_cats.items(), key=lambda it: it[1])
                 gold_label, gold_score = max(gold_cats.items(), key=lambda it: it[1])
-                if gold_score is not None:
-                    if pred_label == gold_label and pred_score >= threshold:
-                        f_per_type[pred_label].tp += 1
-                    else:
-                        f_per_type[gold_label].fn += 1
-                        if pred_score >= threshold:
-                            f_per_type[pred_label].fp += 1
+                if pred_label == gold_label:
+                    f_per_type[pred_label].tp += 1
+                else:
+                    f_per_type[gold_label].fn += 1
+                    f_per_type[pred_label].fp += 1
             elif gold_cats:
                 gold_label, gold_score = max(gold_cats, key=lambda it: it[1])
-                if gold_score is not None and gold_score > 0:
+                if gold_score > 0:
                     f_per_type[gold_label].fn += 1
             elif pred_cats:
                 pred_label, pred_score = max(pred_cats.items(), key=lambda it: it[1])
-                if pred_score >= threshold:
-                    f_per_type[pred_label].fp += 1
+                f_per_type[pred_label].fp += 1
         micro_prf = PRFScore()
         for label_prf in f_per_type.values():
             micro_prf.tp += label_prf.tp
@@ -688,13 +712,13 @@ class Scorer:
                 if align.x2y.lengths[token.i] != 1:
                     gold_i = None  # type: ignore
                 else:
-                    gold_i = align.x2y[token.i].dataXd[0, 0]
+                    gold_i = align.x2y[token.i][0]
                 if gold_i not in missing_indices:
                     dep = getter(token, attr)
                     head = head_getter(token, head_attr)
                     if dep not in ignore_labels and token.orth_.strip():
                         if align.x2y.lengths[head.i] == 1:
-                            gold_head = align.x2y[head.i].dataXd[0, 0]
+                            gold_head = align.x2y[head.i][0]
                         else:
                             gold_head = None
                         # None is indistinct, so we can't just add it to the set
@@ -744,7 +768,7 @@ def get_ner_prf(examples: Iterable[Example], **kwargs) -> Dict[str, Any]:
         for pred_ent in eg.x.ents:
             if pred_ent.label_ not in score_per_type:
                 score_per_type[pred_ent.label_] = PRFScore()
-            indices = align_x2y[pred_ent.start : pred_ent.end].dataXd.ravel()
+            indices = align_x2y[pred_ent.start : pred_ent.end]
             if len(indices):
                 g_span = eg.y[indices[0] : indices[-1] + 1]
                 # Check we aren't missing annotation on this span. If so,

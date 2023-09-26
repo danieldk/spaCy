@@ -1,15 +1,34 @@
+import random
+
 import numpy
-from spacy.training import offsets_to_biluo_tags, biluo_tags_to_offsets, Alignment
-from spacy.training import biluo_tags_to_spans, iob_to_biluo
-from spacy.training import Corpus, docs_to_json, Example
-from spacy.training.align import get_alignments
-from spacy.training.converters import json_to_docs
-from spacy.lang.en import English
-from spacy.tokens import Doc, DocBin
-from spacy.util import get_words_and_spaces, minibatch
-from thinc.api import compounding
 import pytest
 import srsly
+from thinc.api import Adam, compounding
+
+import spacy
+from spacy.lang.en import English
+from spacy.tokens import Doc, DocBin
+from spacy.training import (
+    Alignment,
+    Corpus,
+    Example,
+    biluo_tags_to_offsets,
+    biluo_tags_to_spans,
+    docs_to_json,
+    iob_to_biluo,
+    offsets_to_biluo_tags,
+    validate_distillation_examples,
+)
+from spacy.training.align import get_alignments
+from spacy.training.alignment_array import AlignmentArray
+from spacy.training.converters import json_to_docs
+from spacy.training.loop import train_while_improving
+from spacy.util import (
+    get_words_and_spaces,
+    load_config_from_str,
+    load_model_from_path,
+    minibatch,
+)
 
 from ..util import make_tempdir
 
@@ -66,6 +85,207 @@ def merged_dict():
 def vocab():
     nlp = English()
     return nlp.vocab
+
+
+@pytest.mark.issue(999)
+def test_issue999():
+    """Test that adding entities and resuming training works passably OK.
+    There are two issues here:
+    1) We have to re-add labels. This isn't very nice.
+    2) There's no way to set the learning rate for the weight update, so we
+        end up out-of-scale, causing it to learn too fast.
+    """
+    TRAIN_DATA = [
+        ["hey", []],
+        ["howdy", []],
+        ["hey there", []],
+        ["hello", []],
+        ["hi", []],
+        ["i'm looking for a place to eat", []],
+        ["i'm looking for a place in the north of town", [(31, 36, "LOCATION")]],
+        ["show me chinese restaurants", [(8, 15, "CUISINE")]],
+        ["show me chines restaurants", [(8, 14, "CUISINE")]],
+    ]
+    nlp = English()
+    ner = nlp.add_pipe("ner")
+    for _, offsets in TRAIN_DATA:
+        for start, end, label in offsets:
+            ner.add_label(label)
+    nlp.initialize()
+    for itn in range(20):
+        random.shuffle(TRAIN_DATA)
+        for raw_text, entity_offsets in TRAIN_DATA:
+            example = Example.from_dict(
+                nlp.make_doc(raw_text), {"entities": entity_offsets}
+            )
+            nlp.update([example])
+
+    with make_tempdir() as model_dir:
+        nlp.to_disk(model_dir)
+        nlp2 = load_model_from_path(model_dir)
+
+    for raw_text, entity_offsets in TRAIN_DATA:
+        doc = nlp2(raw_text)
+        ents = {(ent.start_char, ent.end_char): ent.label_ for ent in doc.ents}
+        for start, end, label in entity_offsets:
+            if (start, end) in ents:
+                assert ents[(start, end)] == label
+                break
+            else:
+                if entity_offsets:
+                    raise Exception(ents)
+
+
+@pytest.mark.issue(4402)
+def test_issue4402():
+    json_data = {
+        "id": 0,
+        "paragraphs": [
+            {
+                "raw": "How should I cook bacon in an oven?\nI've heard of people cooking bacon in an oven.",
+                "sentences": [
+                    {
+                        "tokens": [
+                            {"id": 0, "orth": "How", "ner": "O"},
+                            {"id": 1, "orth": "should", "ner": "O"},
+                            {"id": 2, "orth": "I", "ner": "O"},
+                            {"id": 3, "orth": "cook", "ner": "O"},
+                            {"id": 4, "orth": "bacon", "ner": "O"},
+                            {"id": 5, "orth": "in", "ner": "O"},
+                            {"id": 6, "orth": "an", "ner": "O"},
+                            {"id": 7, "orth": "oven", "ner": "O"},
+                            {"id": 8, "orth": "?", "ner": "O"},
+                        ],
+                        "brackets": [],
+                    },
+                    {
+                        "tokens": [
+                            {"id": 9, "orth": "\n", "ner": "O"},
+                            {"id": 10, "orth": "I", "ner": "O"},
+                            {"id": 11, "orth": "'ve", "ner": "O"},
+                            {"id": 12, "orth": "heard", "ner": "O"},
+                            {"id": 13, "orth": "of", "ner": "O"},
+                            {"id": 14, "orth": "people", "ner": "O"},
+                            {"id": 15, "orth": "cooking", "ner": "O"},
+                            {"id": 16, "orth": "bacon", "ner": "O"},
+                            {"id": 17, "orth": "in", "ner": "O"},
+                            {"id": 18, "orth": "an", "ner": "O"},
+                            {"id": 19, "orth": "oven", "ner": "O"},
+                            {"id": 20, "orth": ".", "ner": "O"},
+                        ],
+                        "brackets": [],
+                    },
+                ],
+                "cats": [
+                    {"label": "baking", "value": 1.0},
+                    {"label": "not_baking", "value": 0.0},
+                ],
+            },
+            {
+                "raw": "What is the difference between white and brown eggs?\n",
+                "sentences": [
+                    {
+                        "tokens": [
+                            {"id": 0, "orth": "What", "ner": "O"},
+                            {"id": 1, "orth": "is", "ner": "O"},
+                            {"id": 2, "orth": "the", "ner": "O"},
+                            {"id": 3, "orth": "difference", "ner": "O"},
+                            {"id": 4, "orth": "between", "ner": "O"},
+                            {"id": 5, "orth": "white", "ner": "O"},
+                            {"id": 6, "orth": "and", "ner": "O"},
+                            {"id": 7, "orth": "brown", "ner": "O"},
+                            {"id": 8, "orth": "eggs", "ner": "O"},
+                            {"id": 9, "orth": "?", "ner": "O"},
+                        ],
+                        "brackets": [],
+                    },
+                    {"tokens": [{"id": 10, "orth": "\n", "ner": "O"}], "brackets": []},
+                ],
+                "cats": [
+                    {"label": "baking", "value": 0.0},
+                    {"label": "not_baking", "value": 1.0},
+                ],
+            },
+        ],
+    }
+    nlp = English()
+    attrs = ["ORTH", "SENT_START", "ENT_IOB", "ENT_TYPE"]
+    with make_tempdir() as tmpdir:
+        output_file = tmpdir / "test4402.spacy"
+        docs = json_to_docs([json_data])
+        data = DocBin(docs=docs, attrs=attrs).to_bytes()
+        with output_file.open("wb") as file_:
+            file_.write(data)
+        reader = Corpus(output_file)
+        train_data = list(reader(nlp))
+        assert len(train_data) == 2
+
+        split_train_data = []
+        for eg in train_data:
+            split_train_data.extend(eg.split_sents())
+        assert len(split_train_data) == 4
+
+
+CONFIG_7029 = """
+[nlp]
+lang = "en"
+pipeline = ["tok2vec", "tagger"]
+
+[components]
+
+[components.tok2vec]
+factory = "tok2vec"
+
+[components.tok2vec.model]
+@architectures = "spacy.Tok2Vec.v1"
+
+[components.tok2vec.model.embed]
+@architectures = "spacy.MultiHashEmbed.v1"
+width = ${components.tok2vec.model.encode:width}
+attrs = ["NORM","PREFIX","SUFFIX","SHAPE"]
+rows = [5000,2500,2500,2500]
+include_static_vectors = false
+
+[components.tok2vec.model.encode]
+@architectures = "spacy.MaxoutWindowEncoder.v1"
+width = 96
+depth = 4
+window_size = 1
+maxout_pieces = 3
+
+[components.tagger]
+factory = "tagger"
+
+[components.tagger.model]
+@architectures = "spacy.Tagger.v2"
+nO = null
+
+[components.tagger.model.tok2vec]
+@architectures = "spacy.Tok2VecListener.v1"
+width = ${components.tok2vec.model.encode:width}
+upstream = "*"
+"""
+
+
+@pytest.mark.issue(7029)
+def test_issue7029():
+    """Test that an empty document doesn't mess up an entire batch."""
+    TRAIN_DATA = [
+        ("I like green eggs", {"tags": ["N", "V", "J", "N"]}),
+        ("Eat blue ham", {"tags": ["V", "J", "N"]}),
+    ]
+    nlp = English.from_config(load_config_from_str(CONFIG_7029))
+    train_examples = []
+    for t in TRAIN_DATA:
+        train_examples.append(Example.from_dict(nlp.make_doc(t[0]), t[1]))
+    optimizer = nlp.initialize(get_examples=lambda: train_examples)
+    for i in range(50):
+        losses = {}
+        nlp.update(train_examples, sgd=optimizer, losses=losses)
+    texts = ["first", "second", "third", "fourth", "and", "then", "some", ""]
+    docs1 = list(nlp.pipe(texts, batch_size=1))
+    docs2 = list(nlp.pipe(texts, batch_size=4))
+    assert [doc[0].tag_ for doc in docs1[:-1]] == [doc[0].tag_ for doc in docs2[:-1]]
 
 
 def test_gold_biluo_U(en_vocab):
@@ -156,6 +376,19 @@ def test_example_from_dict_some_ner(en_vocab):
     )
     ner_tags = example.get_aligned_ner()
     assert ner_tags == ["U-LOC", None, None, None]
+
+
+def test_validate_distillation_examples(en_vocab):
+    words = ["a", "b", "c", "d"]
+    spaces = [True, True, False, True]
+    predicted = Doc(en_vocab, words=words, spaces=spaces)
+
+    example = Example.from_dict(predicted, {})
+    validate_distillation_examples([example], "test_validate_distillation_examples")
+
+    example = Example.from_dict(predicted, {"words": words + ["e"]})
+    with pytest.raises(ValueError, match=r"distillation"):
+        validate_distillation_examples([example], "test_validate_distillation_examples")
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning")
@@ -466,13 +699,38 @@ def test_gold_ner_missing_tags(en_tokenizer):
 
 def test_projectivize(en_tokenizer):
     doc = en_tokenizer("He pretty quickly walks away")
-    heads = [3, 2, 3, 0, 2]
+    heads = [3, 2, 3, 3, 2]
     deps = ["dep"] * len(heads)
     example = Example.from_dict(doc, {"heads": heads, "deps": deps})
     proj_heads, proj_labels = example.get_aligned_parse(projectivize=True)
     nonproj_heads, nonproj_labels = example.get_aligned_parse(projectivize=False)
-    assert proj_heads == [3, 2, 3, 0, 3]
-    assert nonproj_heads == [3, 2, 3, 0, 2]
+    assert proj_heads == [3, 2, 3, 3, 3]
+    assert nonproj_heads == [3, 2, 3, 3, 2]
+
+    # Test single token documents
+    doc = en_tokenizer("Conrail")
+    heads = [0]
+    deps = ["dep"]
+    example = Example.from_dict(doc, {"heads": heads, "deps": deps})
+    proj_heads, proj_labels = example.get_aligned_parse(projectivize=True)
+    assert proj_heads == heads
+    assert proj_labels == deps
+
+    # Test documents with no alignments
+    doc_a = Doc(
+        doc.vocab, words=["Double-Jointed"], spaces=[False], deps=["ROOT"], heads=[0]
+    )
+    doc_b = Doc(
+        doc.vocab,
+        words=["Double", "-", "Jointed"],
+        spaces=[True, True, True],
+        deps=["amod", "punct", "ROOT"],
+        heads=[2, 2, 2],
+    )
+    example = Example(doc_a, doc_b)
+    proj_heads, proj_deps = example.get_aligned_parse(projectivize=True)
+    assert proj_heads == [None]
+    assert proj_deps == [None]
 
 
 def test_iob_to_biluo():
@@ -673,7 +931,9 @@ def _train_tuples(train_data):
     optimizer = nlp.initialize()
     for i in range(5):
         losses = {}
-        batches = minibatch(train_examples, size=compounding(4.0, 32.0, 1.001))
+        batches = minibatch(
+            train_examples, size=compounding(4.0, 32.0, 1.001).to_generator()
+        )
         for batch in batches:
             nlp.update(batch, sgd=optimizer, losses=losses)
 
@@ -704,9 +964,41 @@ def test_alignment():
     spacy_tokens = ["i", "listened", "to", "obama", "'s", "podcasts", "."]
     align = Alignment.from_strings(other_tokens, spacy_tokens)
     assert list(align.x2y.lengths) == [1, 1, 1, 1, 1, 1, 1, 1]
-    assert list(align.x2y.dataXd) == [0, 1, 2, 3, 4, 4, 5, 6]
+    assert list(align.x2y.data) == [0, 1, 2, 3, 4, 4, 5, 6]
     assert list(align.y2x.lengths) == [1, 1, 1, 1, 2, 1, 1]
-    assert list(align.y2x.dataXd) == [0, 1, 2, 3, 4, 5, 6, 7]
+    assert list(align.y2x.data) == [0, 1, 2, 3, 4, 5, 6, 7]
+
+
+def test_alignment_array():
+    a = AlignmentArray([[0, 1, 2], [3], [], [4, 5, 6, 7], [8, 9]])
+    assert list(a.data) == [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert list(a.lengths) == [3, 1, 0, 4, 2]
+    assert list(a[3]) == [4, 5, 6, 7]
+    assert list(a[2]) == []
+    assert list(a[-2]) == [4, 5, 6, 7]
+    assert list(a[1:4]) == [3, 4, 5, 6, 7]
+    assert list(a[1:]) == [3, 4, 5, 6, 7, 8, 9]
+    assert list(a[:3]) == [0, 1, 2, 3]
+    assert list(a[:]) == list(a.data)
+    assert list(a[0:0]) == []
+    assert list(a[3:3]) == []
+    assert list(a[-1:-1]) == []
+    with pytest.raises(ValueError, match=r"only supports slicing with a step of 1"):
+        a[:4:-1]
+    with pytest.raises(
+        ValueError, match=r"only supports indexing using an int or a slice"
+    ):
+        a[[0, 1, 3]]
+
+    a = AlignmentArray([[], [1, 2, 3], [4, 5]])
+    assert list(a[0]) == []
+    assert list(a[0:1]) == []
+    assert list(a[2]) == [4, 5]
+    assert list(a[0:2]) == [1, 2, 3]
+
+    a = AlignmentArray([[1, 2, 3], [4, 5], []])
+    assert list(a[-1]) == []
+    assert list(a[-2:]) == [4, 5]
 
 
 def test_alignment_case_insensitive():
@@ -714,9 +1006,9 @@ def test_alignment_case_insensitive():
     spacy_tokens = ["i", "listened", "to", "Obama", "'s", "PODCASTS", "."]
     align = Alignment.from_strings(other_tokens, spacy_tokens)
     assert list(align.x2y.lengths) == [1, 1, 1, 1, 1, 1, 1, 1]
-    assert list(align.x2y.dataXd) == [0, 1, 2, 3, 4, 4, 5, 6]
+    assert list(align.x2y.data) == [0, 1, 2, 3, 4, 4, 5, 6]
     assert list(align.y2x.lengths) == [1, 1, 1, 1, 2, 1, 1]
-    assert list(align.y2x.dataXd) == [0, 1, 2, 3, 4, 5, 6, 7]
+    assert list(align.y2x.data) == [0, 1, 2, 3, 4, 5, 6, 7]
 
 
 def test_alignment_complex():
@@ -724,9 +1016,9 @@ def test_alignment_complex():
     spacy_tokens = ["i", "listened", "to", "obama", "'s", "podcasts."]
     align = Alignment.from_strings(other_tokens, spacy_tokens)
     assert list(align.x2y.lengths) == [3, 1, 1, 1, 1, 1]
-    assert list(align.x2y.dataXd) == [0, 1, 2, 3, 4, 4, 5, 5]
+    assert list(align.x2y.data) == [0, 1, 2, 3, 4, 4, 5, 5]
     assert list(align.y2x.lengths) == [1, 1, 1, 1, 2, 2]
-    assert list(align.y2x.dataXd) == [0, 0, 0, 1, 2, 3, 4, 5]
+    assert list(align.y2x.data) == [0, 0, 0, 1, 2, 3, 4, 5]
 
 
 def test_alignment_complex_example(en_vocab):
@@ -743,9 +1035,9 @@ def test_alignment_complex_example(en_vocab):
     example = Example(predicted, reference)
     align = example.alignment
     assert list(align.x2y.lengths) == [3, 1, 1, 1, 1, 1]
-    assert list(align.x2y.dataXd) == [0, 1, 2, 3, 4, 4, 5, 5]
+    assert list(align.x2y.data) == [0, 1, 2, 3, 4, 4, 5, 5]
     assert list(align.y2x.lengths) == [1, 1, 1, 1, 2, 2]
-    assert list(align.y2x.dataXd) == [0, 0, 0, 1, 2, 3, 4, 5]
+    assert list(align.y2x.data) == [0, 0, 0, 1, 2, 3, 4, 5]
 
 
 def test_alignment_different_texts():
@@ -761,70 +1053,70 @@ def test_alignment_spaces(en_vocab):
     spacy_tokens = ["i", "listened", "to", "obama", "'s", "podcasts."]
     align = Alignment.from_strings(other_tokens, spacy_tokens)
     assert list(align.x2y.lengths) == [0, 3, 1, 1, 1, 1, 1]
-    assert list(align.x2y.dataXd) == [0, 1, 2, 3, 4, 4, 5, 5]
+    assert list(align.x2y.data) == [0, 1, 2, 3, 4, 4, 5, 5]
     assert list(align.y2x.lengths) == [1, 1, 1, 1, 2, 2]
-    assert list(align.y2x.dataXd) == [1, 1, 1, 2, 3, 4, 5, 6]
+    assert list(align.y2x.data) == [1, 1, 1, 2, 3, 4, 5, 6]
 
     # multiple leading whitespace tokens
     other_tokens = [" ", " ", "i listened to", "obama", "'", "s", "podcasts", "."]
     spacy_tokens = ["i", "listened", "to", "obama", "'s", "podcasts."]
     align = Alignment.from_strings(other_tokens, spacy_tokens)
     assert list(align.x2y.lengths) == [0, 0, 3, 1, 1, 1, 1, 1]
-    assert list(align.x2y.dataXd) == [0, 1, 2, 3, 4, 4, 5, 5]
+    assert list(align.x2y.data) == [0, 1, 2, 3, 4, 4, 5, 5]
     assert list(align.y2x.lengths) == [1, 1, 1, 1, 2, 2]
-    assert list(align.y2x.dataXd) == [2, 2, 2, 3, 4, 5, 6, 7]
+    assert list(align.y2x.data) == [2, 2, 2, 3, 4, 5, 6, 7]
 
     # both with leading whitespace, not identical
     other_tokens = [" ", " ", "i listened to", "obama", "'", "s", "podcasts", "."]
     spacy_tokens = [" ", "i", "listened", "to", "obama", "'s", "podcasts."]
     align = Alignment.from_strings(other_tokens, spacy_tokens)
     assert list(align.x2y.lengths) == [1, 0, 3, 1, 1, 1, 1, 1]
-    assert list(align.x2y.dataXd) == [0, 1, 2, 3, 4, 5, 5, 6, 6]
+    assert list(align.x2y.data) == [0, 1, 2, 3, 4, 5, 5, 6, 6]
     assert list(align.y2x.lengths) == [1, 1, 1, 1, 1, 2, 2]
-    assert list(align.y2x.dataXd) == [0, 2, 2, 2, 3, 4, 5, 6, 7]
+    assert list(align.y2x.data) == [0, 2, 2, 2, 3, 4, 5, 6, 7]
 
     # same leading whitespace, different tokenization
     other_tokens = [" ", " ", "i listened to", "obama", "'", "s", "podcasts", "."]
     spacy_tokens = ["  ", "i", "listened", "to", "obama", "'s", "podcasts."]
     align = Alignment.from_strings(other_tokens, spacy_tokens)
     assert list(align.x2y.lengths) == [1, 1, 3, 1, 1, 1, 1, 1]
-    assert list(align.x2y.dataXd) == [0, 0, 1, 2, 3, 4, 5, 5, 6, 6]
+    assert list(align.x2y.data) == [0, 0, 1, 2, 3, 4, 5, 5, 6, 6]
     assert list(align.y2x.lengths) == [2, 1, 1, 1, 1, 2, 2]
-    assert list(align.y2x.dataXd) == [0, 1, 2, 2, 2, 3, 4, 5, 6, 7]
+    assert list(align.y2x.data) == [0, 1, 2, 2, 2, 3, 4, 5, 6, 7]
 
     # only one with trailing whitespace
     other_tokens = ["i listened to", "obama", "'", "s", "podcasts", ".", " "]
     spacy_tokens = ["i", "listened", "to", "obama", "'s", "podcasts."]
     align = Alignment.from_strings(other_tokens, spacy_tokens)
     assert list(align.x2y.lengths) == [3, 1, 1, 1, 1, 1, 0]
-    assert list(align.x2y.dataXd) == [0, 1, 2, 3, 4, 4, 5, 5]
+    assert list(align.x2y.data) == [0, 1, 2, 3, 4, 4, 5, 5]
     assert list(align.y2x.lengths) == [1, 1, 1, 1, 2, 2]
-    assert list(align.y2x.dataXd) == [0, 0, 0, 1, 2, 3, 4, 5]
+    assert list(align.y2x.data) == [0, 0, 0, 1, 2, 3, 4, 5]
 
     # different trailing whitespace
     other_tokens = ["i listened to", "obama", "'", "s", "podcasts", ".", " ", " "]
     spacy_tokens = ["i", "listened", "to", "obama", "'s", "podcasts.", " "]
     align = Alignment.from_strings(other_tokens, spacy_tokens)
     assert list(align.x2y.lengths) == [3, 1, 1, 1, 1, 1, 1, 0]
-    assert list(align.x2y.dataXd) == [0, 1, 2, 3, 4, 4, 5, 5, 6]
+    assert list(align.x2y.data) == [0, 1, 2, 3, 4, 4, 5, 5, 6]
     assert list(align.y2x.lengths) == [1, 1, 1, 1, 2, 2, 1]
-    assert list(align.y2x.dataXd) == [0, 0, 0, 1, 2, 3, 4, 5, 6]
+    assert list(align.y2x.data) == [0, 0, 0, 1, 2, 3, 4, 5, 6]
 
     # same trailing whitespace, different tokenization
     other_tokens = ["i listened to", "obama", "'", "s", "podcasts", ".", " ", " "]
     spacy_tokens = ["i", "listened", "to", "obama", "'s", "podcasts.", "  "]
     align = Alignment.from_strings(other_tokens, spacy_tokens)
     assert list(align.x2y.lengths) == [3, 1, 1, 1, 1, 1, 1, 1]
-    assert list(align.x2y.dataXd) == [0, 1, 2, 3, 4, 4, 5, 5, 6, 6]
+    assert list(align.x2y.data) == [0, 1, 2, 3, 4, 4, 5, 5, 6, 6]
     assert list(align.y2x.lengths) == [1, 1, 1, 1, 2, 2, 2]
-    assert list(align.y2x.dataXd) == [0, 0, 0, 1, 2, 3, 4, 5, 6, 7]
+    assert list(align.y2x.data) == [0, 0, 0, 1, 2, 3, 4, 5, 6, 7]
 
     # differing whitespace is allowed
     other_tokens = ["a", " \n ", "b", "c"]
     spacy_tokens = ["a", "b", " ", "c"]
     align = Alignment.from_strings(other_tokens, spacy_tokens)
-    assert list(align.x2y.dataXd) == [0, 1, 3]
-    assert list(align.y2x.dataXd) == [0, 2, 3]
+    assert list(align.x2y.data) == [0, 1, 3]
+    assert list(align.y2x.data) == [0, 2, 3]
 
     # other differences in whitespace are allowed
     other_tokens = [" ", "a"]
@@ -850,3 +1142,39 @@ def test_retokenized_docs(doc):
         retokenizer.merge(doc1[0:2])
         retokenizer.merge(doc1[5:7])
     assert example.get_aligned("ORTH", as_string=True) == expected2
+
+
+def test_training_before_update(doc):
+    def before_update(nlp, args):
+        assert args["step"] == 0
+        assert args["epoch"] == 1
+
+        # Raise an error here as the rest of the loop
+        # will not run to completion due to uninitialized
+        # models.
+        raise ValueError("ran_before_update")
+
+    def generate_batch():
+        yield 1, [Example(doc, doc)]
+
+    nlp = spacy.blank("en")
+    nlp.add_pipe("tagger")
+    optimizer = Adam()
+    generator = train_while_improving(
+        nlp,
+        optimizer,
+        generate_batch(),
+        lambda: None,
+        dropout=0.1,
+        eval_frequency=100,
+        accumulate_gradient=10,
+        patience=10,
+        max_steps=100,
+        exclude=[],
+        annotating_components=[],
+        before_update=before_update,
+    )
+
+    with pytest.raises(ValueError, match="ran_before_update"):
+        for _ in generator:
+            pass

@@ -1,28 +1,27 @@
 # cython: profile=True
-from libc.string cimport memcpy
-
-import srsly
-from thinc.api import get_array_module, get_current_ops
 import functools
 
-from .lexeme cimport EMPTY_LEXEME, OOV_RANK
-from .lexeme cimport Lexeme
-from .typedefs cimport attr_t
-from .tokens.token cimport Token
-from .attrs cimport LANG, ORTH
+import numpy
+import srsly
+from thinc.api import get_array_module, get_current_ops
 
+from .attrs cimport LANG, ORTH
+from .lexeme cimport EMPTY_LEXEME, OOV_RANK, Lexeme
+from .tokens.token cimport Token
+from .typedefs cimport attr_t
+
+from . import util
+from .attrs import IS_STOP, NORM, intify_attrs
 from .compat import copy_reg
 from .errors import Errors
-from .attrs import intify_attrs, NORM, IS_STOP
-from .vectors import Vectors, Mode as VectorsMode
-from .util import registry
-from .lookups import Lookups
-from . import util
+from .lang.lex_attrs import LEX_ATTRS, get_lang, is_stop
 from .lang.norm_exceptions import BASE_NORMS
-from .lang.lex_attrs import LEX_ATTRS, is_stop, get_lang
+from .lookups import Lookups
+from .vectors import Mode as VectorsMode
+from .vectors import Vectors
 
 
-def create_vocab(lang, defaults, vectors_name=None):
+def create_vocab(lang, defaults):
     # If the spacy-lookups-data package is installed, we pre-populate the lookups
     # with lexeme data, if available
     lex_attrs = {**LEX_ATTRS, **defaults.lex_attr_getters}
@@ -38,7 +37,6 @@ def create_vocab(lang, defaults, vectors_name=None):
         lex_attr_getters=lex_attrs,
         writing_system=defaults.writing_system,
         get_noun_chunks=defaults.syntax_iterators.get("noun_chunks"),
-        vectors_name=vectors_name,
     )
 
 
@@ -49,9 +47,15 @@ cdef class Vocab:
 
     DOCS: https://spacy.io/api/vocab
     """
-    def __init__(self, lex_attr_getters=None, strings=tuple(), lookups=None,
-                 oov_prob=-20., vectors_name=None, writing_system={},
-                 get_noun_chunks=None, **deprecated_kwargs):
+    def __init__(
+        self,
+        lex_attr_getters=None,
+        strings=None,
+        lookups=None,
+        oov_prob=-20.,
+        writing_system=None,
+        get_noun_chunks=None
+    ):
         """Create the vocabulary.
 
         lex_attr_getters (dict): A dictionary mapping attribute IDs to
@@ -60,7 +64,6 @@ cdef class Vocab:
             vice versa.
         lookups (Lookups): Container for large lookup tables and dictionaries.
         oov_prob (float): Default OOV probability.
-        vectors_name (str): Optional name to identify the vectors table.
         get_noun_chunks (Optional[Callable[[Union[Doc, Span], Iterator[Tuple[int, int, int]]]]]):
             A function that yields base noun phrases used for Doc.noun_chunks.
         """
@@ -70,16 +73,19 @@ cdef class Vocab:
         self.cfg = {'oov_prob': oov_prob}
         self.mem = Pool()
         self._by_orth = PreshMap()
-        self.strings = StringStore()
         self.length = 0
-        if strings:
-            for string in strings:
-                _ = self[string]
+        if strings is None:
+            self.strings = StringStore()
+        else:
+            self.strings = strings
         self.lex_attr_getters = lex_attr_getters
         self.morphology = Morphology(self.strings)
-        self.vectors = Vectors(strings=self.strings, name=vectors_name)
+        self.vectors = Vectors(strings=self.strings)
         self.lookups = lookups
-        self.writing_system = writing_system
+        if writing_system is None:
+            self.writing_system = {}
+        else:
+            self.writing_system = writing_system
         self.get_noun_chunks = get_noun_chunks
 
     property vectors:
@@ -138,7 +144,7 @@ cdef class Vocab:
         self.lex_attr_getters[flag_id] = flag_getter
         return flag_id
 
-    cdef const LexemeC* get(self, Pool mem, str string) except NULL:
+    cdef const LexemeC* get(self, str string) except NULL:
         """Get a pointer to a `LexemeC` from the lexicon, creating a new
         `Lexeme` if necessary using memory acquired from the given pool. If the
         pool is the lexicon's own memory, the lexeme is saved in the lexicon.
@@ -148,7 +154,6 @@ cdef class Vocab:
         cdef LexemeC* lex
         cdef hash_t key = self.strings[string]
         lex = <LexemeC*>self._by_orth.get(key)
-        cdef size_t addr
         if lex != NULL:
             assert lex.orth in self.strings
             if lex.orth != key:
@@ -156,9 +161,9 @@ cdef class Vocab:
                                                   orth=key, orth_id=string))
             return lex
         else:
-            return self._new_lexeme(mem, string)
+            return self._new_lexeme(string)
 
-    cdef const LexemeC* get_by_orth(self, Pool mem, attr_t orth) except NULL:
+    cdef const LexemeC* get_by_orth(self, attr_t orth) except NULL:
         """Get a pointer to a `LexemeC` from the lexicon, creating a new
         `Lexeme` if necessary using memory acquired from the given pool. If the
         pool is the lexicon's own memory, the lexeme is saved in the lexicon.
@@ -170,21 +175,10 @@ cdef class Vocab:
         if lex != NULL:
             return lex
         else:
-            return self._new_lexeme(mem, self.strings[orth])
+            return self._new_lexeme(self.strings[orth])
 
-    cdef const LexemeC* _new_lexeme(self, Pool mem, str string) except NULL:
-        # I think this heuristic is bad, and the Vocab should always
-        # own the lexemes. It avoids weird bugs this way, as it's how the thing
-        # was originally supposed to work. The best solution to the growing
-        # memory use is to periodically reset the vocab, which is an action
-        # that should be up to the user to do (so we don't need to keep track
-        # of the doc ownership).
-        # TODO: Change the C API so that the mem isn't passed in here.
-        mem = self.mem
-        #if len(string) < 3 or self.length < 10000:
-        #    mem = self.mem
-        cdef bint is_oov = mem is not self.mem
-        lex = <LexemeC*>mem.alloc(1, sizeof(LexemeC))
+    cdef const LexemeC* _new_lexeme(self, str string) except NULL:
+        lex = <LexemeC*>self.mem.alloc(1, sizeof(LexemeC))
         lex.orth = self.strings.add(string)
         lex.length = len(string)
         if self.vectors is not None:
@@ -198,8 +192,7 @@ cdef class Vocab:
                     value = self.strings.add(value)
                 if value is not None:
                     Lexeme.set_struct_attr(lex, attr, value)
-        if not is_oov:
-            self._add_lex_to_vocab(lex.orth, lex)
+        self._add_lex_to_vocab(lex.orth, lex)
         if lex == NULL:
             raise ValueError(Errors.E085.format(string=string))
         return lex
@@ -267,11 +260,10 @@ cdef class Vocab:
         cdef int i
         tokens = <TokenC*>self.mem.alloc(len(substrings) + 1, sizeof(TokenC))
         for i, props in enumerate(substrings):
-            props = intify_attrs(props, strings_map=self.strings,
-                                 _do_deprecated=True)
+            props = intify_attrs(props, strings_map=self.strings)
             token = &tokens[i]
             # Set the special tokens up to have arbitrary attributes
-            lex = <LexemeC*>self.get_by_orth(self.mem, props[ORTH])
+            lex = <LexemeC*>self.get_by_orth(props[ORTH])
             token.lex = lex
             for attr_id, value in props.items():
                 Token.set_struct_attr(token, attr_id, value)
@@ -283,7 +275,7 @@ cdef class Vocab:
 
     @property
     def vectors_length(self):
-        return self.vectors.data.shape[1]
+        return self.vectors.shape[1]
 
     def reset_vectors(self, *, width=None, shape=None):
         """Drop the current vector table. Because all vectors must be the same
@@ -294,8 +286,35 @@ cdef class Vocab:
         elif shape is not None:
             self.vectors = Vectors(strings=self.strings, shape=shape)
         else:
-            width = width if width is not None else self.vectors.data.shape[1]
+            width = width if width is not None else self.vectors.shape[1]
             self.vectors = Vectors(strings=self.strings, shape=(self.vectors.shape[0], width))
+
+    def deduplicate_vectors(self):
+        if self.vectors.mode != VectorsMode.default:
+            raise ValueError(Errors.E858.format(
+                mode=self.vectors.mode,
+                alternative=""
+            ))
+        ops = get_current_ops()
+        xp = get_array_module(self.vectors.data)
+        filled = xp.asarray(
+            sorted(list({row for row in self.vectors.key2row.values()}))
+        )
+        # deduplicate data and remap keys
+        data = numpy.unique(ops.to_numpy(self.vectors.data[filled]), axis=0)
+        data = ops.asarray(data)
+        if data.shape == self.vectors.data.shape:
+            # nothing to deduplicate
+            return
+        row_by_bytes = {row.tobytes(): i for i, row in enumerate(data)}
+        key2row = {
+            key: row_by_bytes[self.vectors.data[row].tobytes()]
+            for key, row in self.vectors.key2row.items()
+        }
+        # replace vectors with deduplicated version
+        self.vectors = Vectors(strings=self.strings, data=data)
+        for key, row in key2row.items():
+            self.vectors.add(key, row=row)
 
     def prune_vectors(self, nr_row, batch_size=1024):
         """Reduce the current vector table to `nr_row` unique entries. Words
@@ -325,7 +344,10 @@ cdef class Vocab:
         DOCS: https://spacy.io/api/vocab#prune_vectors
         """
         if self.vectors.mode != VectorsMode.default:
-            raise ValueError(Errors.E866)
+            raise ValueError(Errors.E858.format(
+                mode=self.vectors.mode,
+                alternative=""
+            ))
         ops = get_current_ops()
         xp = get_array_module(self.vectors.data)
         # Make sure all vectors are in the vocab
@@ -333,14 +355,19 @@ cdef class Vocab:
             self[orth]
         # Make prob negative so it sorts by rank ascending
         # (key2row contains the rank)
-        priority = [(-lex.prob, self.vectors.key2row[lex.orth], lex.orth)
-                    for lex in self if lex.orth in self.vectors.key2row]
+        priority = []
+        cdef Lexeme lex
+        cdef attr_t value
+        for lex in self:
+            value = Lexeme.get_struct_attr(lex.c, self.vectors.attr)
+            if value in self.vectors.key2row:
+                priority.append((-lex.prob, self.vectors.key2row[value], value))
         priority.sort()
         indices = xp.asarray([i for (prob, i, key) in priority], dtype="uint64")
         keys = xp.asarray([key for (prob, i, key) in priority], dtype="uint64")
         keep = xp.ascontiguousarray(self.vectors.data[indices[:nr_row]])
         toss = xp.ascontiguousarray(self.vectors.data[indices[nr_row:]])
-        self.vectors = Vectors(strings=self.strings, data=keep, keys=keys[:nr_row], name=self.vectors.name)
+        self.vectors = Vectors(strings=self.strings, data=keep, keys=keys[:nr_row])
         syn_keys, syn_rows, scores = self.vectors.most_similar(toss, batch_size=batch_size)
         syn_keys = ops.to_numpy(syn_keys)
         remap = {}
@@ -354,8 +381,9 @@ cdef class Vocab:
 
     def get_vector(self, orth):
         """Retrieve a vector for a word in the vocabulary. Words can be looked
-        up by string or int ID. If no vectors data is loaded, ValueError is
-        raised.
+        up by string or int ID. If the current vectors do not contain an entry
+        for the word, a 0-vector with the same number of dimensions as the
+        current vectors is returned.
 
         orth (int / unicode): The hash value of a word, or its unicode string.
         RETURNS (numpy.ndarray or cupy.ndarray): A word vector. Size
@@ -366,8 +394,10 @@ cdef class Vocab:
         """
         if isinstance(orth, str):
             orth = self.strings.add(orth)
-        if self.has_vector(orth):
-            return self.vectors[orth]
+        cdef Lexeme lex = self[orth]
+        key = Lexeme.get_struct_attr(lex.c, self.vectors.attr)
+        if self.has_vector(key):
+            return self.vectors[key]
         xp = get_array_module(self.vectors.data)
         vectors = xp.zeros((self.vectors_length,), dtype="f")
         return vectors
@@ -383,15 +413,16 @@ cdef class Vocab:
         """
         if isinstance(orth, str):
             orth = self.strings.add(orth)
-        if self.vectors.is_full and orth not in self.vectors:
+        cdef Lexeme lex = self[orth]
+        key = Lexeme.get_struct_attr(lex.c, self.vectors.attr)
+        if self.vectors.is_full and key not in self.vectors:
             new_rows = max(100, int(self.vectors.shape[0]*1.3))
             if self.vectors.shape[1] == 0:
                 width = vector.size
             else:
                 width = self.vectors.shape[1]
             self.vectors.resize((new_rows, width))
-        lex = self[orth]  # Add word to vocab if necessary
-        row = self.vectors.add(orth, vector=vector)
+        row = self.vectors.add(key, vector=vector)
         if row >= 0:
             lex.rank = row
 
@@ -406,7 +437,9 @@ cdef class Vocab:
         """
         if isinstance(orth, str):
             orth = self.strings.add(orth)
-        return orth in self.vectors
+        cdef Lexeme lex = self[orth]
+        key = Lexeme.get_struct_attr(lex.c, self.vectors.attr)
+        return key in self.vectors
 
     property lookups:
         def __get__(self):
@@ -420,7 +453,6 @@ cdef class Vocab:
                     self.lookups.get_table("lexeme_norm"),
                 )
 
-
     def to_disk(self, path, *, exclude=tuple()):
         """Save the current state to a directory.
 
@@ -433,12 +465,11 @@ cdef class Vocab:
         path = util.ensure_path(path)
         if not path.exists():
             path.mkdir()
-        setters = ["strings", "vectors"]
         if "strings" not in exclude:
             self.strings.to_disk(path / "strings.json")
-        if "vectors" not in "exclude":
+        if "vectors" not in exclude:
             self.vectors.to_disk(path, exclude=["strings"])
-        if "lookups" not in "exclude":
+        if "lookups" not in exclude:
             self.lookups.to_disk(path)
 
     def from_disk(self, path, *, exclude=tuple()):
@@ -452,7 +483,6 @@ cdef class Vocab:
         DOCS: https://spacy.io/api/vocab#to_disk
         """
         path = util.ensure_path(path)
-        getters = ["strings", "vectors"]
         if "strings" not in exclude:
             self.strings.from_disk(path / "strings.json")  # TODO: add exclude?
         if "vectors" not in exclude:
@@ -527,21 +557,18 @@ def pickle_vocab(vocab):
     sstore = vocab.strings
     vectors = vocab.vectors
     morph = vocab.morphology
-    _unused_object = vocab._unused_object
     lex_attr_getters = srsly.pickle_dumps(vocab.lex_attr_getters)
     lookups = vocab.lookups
     get_noun_chunks = vocab.get_noun_chunks
     return (unpickle_vocab,
-            (sstore, vectors, morph, _unused_object, lex_attr_getters, lookups, get_noun_chunks))
+            (sstore, vectors, morph, lex_attr_getters, lookups, get_noun_chunks))
 
 
-def unpickle_vocab(sstore, vectors, morphology, _unused_object,
-                   lex_attr_getters, lookups, get_noun_chunks):
+def unpickle_vocab(sstore, vectors, morphology, lex_attr_getters, lookups, get_noun_chunks):
     cdef Vocab vocab = Vocab()
     vocab.vectors = vectors
     vocab.strings = sstore
     vocab.morphology = morphology
-    vocab._unused_object = _unused_object
     vocab.lex_attr_getters = srsly.pickle_loads(lex_attr_getters)
     vocab.lookups = lookups
     vocab.get_noun_chunks = get_noun_chunks

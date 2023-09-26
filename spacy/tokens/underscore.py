@@ -1,8 +1,13 @@
-from typing import Dict, Any
-import functools
 import copy
+import functools
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 from ..errors import Errors
+
+if TYPE_CHECKING:
+    from .doc import Doc
+    from .span import Span
+    from .token import Token
 
 
 class Underscore:
@@ -10,8 +15,21 @@ class Underscore:
     doc_extensions: Dict[Any, Any] = {}
     span_extensions: Dict[Any, Any] = {}
     token_extensions: Dict[Any, Any] = {}
+    _extensions: Dict[str, Any]
+    _obj: Union["Doc", "Span", "Token"]
+    _start: Optional[int]
+    _end: Optional[int]
 
-    def __init__(self, extensions, obj, start=None, end=None):
+    def __init__(
+        self,
+        extensions: Dict[str, Any],
+        obj: Union["Doc", "Span", "Token"],
+        start: Optional[int] = None,
+        end: Optional[int] = None,
+        label: int = 0,
+        kb_id: int = 0,
+        span_id: int = 0,
+    ):
         object.__setattr__(self, "_extensions", extensions)
         object.__setattr__(self, "_obj", obj)
         # Assumption is that for doc values, _start and _end will both be None
@@ -22,13 +40,20 @@ class Underscore:
         object.__setattr__(self, "_doc", obj.doc)
         object.__setattr__(self, "_start", start)
         object.__setattr__(self, "_end", end)
+        # We used to check if obj is a span, however, this introduces an
+        # import cycle between the span and underscore modeles. So we
+        # do a structural type check instead.
+        if hasattr(obj, "id") and hasattr(obj, "label") and hasattr(obj, "kb_id"):
+            object.__setattr__(self, "_label", label)
+            object.__setattr__(self, "_kb_id", kb_id)
+            object.__setattr__(self, "_span_id", span_id)
 
-    def __dir__(self):
+    def __dir__(self) -> List[str]:
         # Hack to enable autocomplete on custom extensions
         extensions = list(self._extensions.keys())
         return ["set", "get", "has"] + extensions
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         if name not in self._extensions:
             raise AttributeError(Errors.E046.format(name=name))
         default, method, getter, setter = self._extensions[name]
@@ -56,7 +81,7 @@ class Underscore:
                 return new_default
             return default
 
-    def __setattr__(self, name, value):
+    def __setattr__(self, name: str, value: Any):
         if name not in self._extensions:
             raise AttributeError(Errors.E047.format(name=name))
         default, method, getter, setter = self._extensions[name]
@@ -65,28 +90,61 @@ class Underscore:
         else:
             self._doc.user_data[self._get_key(name)] = value
 
-    def set(self, name, value):
+    def set(self, name: str, value: Any):
         return self.__setattr__(name, value)
 
-    def get(self, name):
+    def get(self, name: str) -> Any:
         return self.__getattr__(name)
 
-    def has(self, name):
+    def has(self, name: str) -> bool:
         return name in self._extensions
 
-    def _get_key(self, name):
-        return ("._.", name, self._start, self._end)
+    def _get_key(
+        self, name: str
+    ) -> Union[
+        Tuple[str, str, Optional[int], Optional[int]],
+        Tuple[str, str, Optional[int], Optional[int], int, int, int],
+    ]:
+        if hasattr(self, "_label"):
+            return (
+                "._.",
+                name,
+                self._start,
+                self._end,
+                self._label,
+                self._kb_id,
+                self._span_id,
+            )
+        else:
+            return "._.", name, self._start, self._end
+
+    @staticmethod
+    def _replace_keys(old_underscore: "Underscore", new_underscore: "Underscore"):
+        """
+        This function is called by Span when its kb_id or label are re-assigned.
+        It checks if any user_data is stored for this span and replaces the keys
+        """
+        for name in old_underscore._extensions:
+            old_key = old_underscore._get_key(name)
+            old_doc = old_underscore._doc
+            new_key = new_underscore._get_key(name)
+            if old_key != new_key and old_key in old_doc.user_data:
+                old_underscore._doc.user_data[
+                    new_key
+                ] = old_underscore._doc.user_data.pop(old_key)
 
     @classmethod
-    def get_state(cls):
+    def get_state(cls) -> Tuple[Dict[Any, Any], Dict[Any, Any], Dict[Any, Any]]:
         return cls.token_extensions, cls.span_extensions, cls.doc_extensions
 
     @classmethod
-    def load_state(cls, state):
+    def load_state(
+        cls, state: Tuple[Dict[Any, Any], Dict[Any, Any], Dict[Any, Any]]
+    ) -> None:
         cls.token_extensions, cls.span_extensions, cls.doc_extensions = state
 
 
-def get_ext_args(**kwargs):
+def get_ext_args(**kwargs: Any):
     """Validate and convert arguments. Reused in Doc, Token and Span."""
     default = kwargs.get("default")
     getter = kwargs.get("getter")

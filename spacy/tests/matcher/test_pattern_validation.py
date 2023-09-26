@@ -1,6 +1,7 @@
 import pytest
-from spacy.matcher import Matcher
+
 from spacy.errors import MatchPatternError
+from spacy.matcher import Matcher
 from spacy.schemas import validate_token_pattern
 
 # (pattern, num errors with validation, num errors identified with minimal
@@ -12,7 +13,16 @@ TEST_PATTERNS = [
     ([{"IS_PUNCT": True, "OP": "$"}], 1, 1),
     ([{"_": "foo"}], 1, 1),
     ('[{"TEXT": "foo"}, {"LOWER": "bar"}]', 1, 1),
+    ([{"ENT_IOB": "foo"}], 1, 1),
     ([1, 2, 3], 3, 1),
+    ([{"TEXT": "foo", "OP": "{,}"}], 1, 1),
+    ([{"TEXT": "foo", "OP": "{,4}4"}], 1, 1),
+    ([{"TEXT": "foo", "OP": "{a,3}"}], 1, 1),
+    ([{"TEXT": "foo", "OP": "{a}"}], 1, 1),
+    ([{"TEXT": "foo", "OP": "{,a}"}], 1, 1),
+    ([{"TEXT": "foo", "OP": "{1,2,3}"}], 1, 1),
+    ([{"TEXT": "foo", "OP": "{1, 3}"}], 1, 1),
+    ([{"TEXT": "foo", "OP": "{-2}"}], 1, 1),
     # Bad patterns flagged outside of Matcher
     ([{"_": {"foo": "bar", "baz": {"IN": "foo"}}}], 2, 0),  # prev: (1, 0)
     # Bad patterns not flagged with minimal checks
@@ -22,6 +32,8 @@ TEST_PATTERNS = [
     ([{"TEXT": {"VALUE": "foo"}}], 2, 0),  # prev: (1, 0)
     ([{"IS_DIGIT": -1}], 1, 0),
     ([{"ORTH": -1}], 1, 0),
+    ([{"ENT_ID": -1}], 1, 0),
+    ([{"ENT_KB_ID": -1}], 1, 0),
     # Good patterns
     ([{"TEXT": "foo"}, {"LOWER": "bar"}], 0, 0),
     ([{"LEMMA": {"IN": ["love", "like"]}}, {"POS": "DET", "OP": "?"}], 0, 0),
@@ -33,11 +45,15 @@ TEST_PATTERNS = [
     ([{"orth": "foo"}], 0, 0),  # prev: xfail
     ([{"IS_SENT_START": True}], 0, 0),
     ([{"SENT_START": True}], 0, 0),
+    ([{"ENT_ID": "STRING"}], 0, 0),
+    ([{"ENT_KB_ID": "STRING"}], 0, 0),
+    ([{"TEXT": "ha", "OP": "{3}"}], 0, 0),
 ]
 
 
 @pytest.mark.parametrize(
-    "pattern", [[{"XX": "y"}, {"LENGTH": "2"}, {"TEXT": {"IN": 5}}]]
+    "pattern",
+    [[{"XX": "y"}], [{"LENGTH": "2"}], [{"TEXT": {"IN": 5}}], [{"text": {"in": 6}}]],
 )
 def test_matcher_pattern_validation(en_vocab, pattern):
     matcher = Matcher(en_vocab, validate=True)

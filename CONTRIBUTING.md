@@ -143,15 +143,25 @@ Changes to `.py` files will be effective immediately.
 ### Fixing bugs
 
 When fixing a bug, first create an
-[issue](https://github.com/explosion/spaCy/issues) if one does not already exist.
-The description text can be very short – we don't want to make this too
+[issue](https://github.com/explosion/spaCy/issues) if one does not already
+exist. The description text can be very short – we don't want to make this too
 bureaucratic.
 
-Next, create a test file named `test_issue[ISSUE NUMBER].py` in the
-[`spacy/tests/regression`](spacy/tests/regression) folder. Test for the bug
-you're fixing, and make sure the test fails. Next, add and commit your test file
-referencing the issue number in the commit message. Finally, fix the bug, make
-sure your test passes and reference the issue in your commit message.
+Next, add a test to the relevant file in the
+[`spacy/tests`](spacy/tests)folder. Then add a [pytest
+mark](https://docs.pytest.org/en/6.2.x/example/markers.html#working-with-custom-markers),
+`@pytest.mark.issue(NUMBER)`, to reference the issue number.
+
+```python
+# Assume you're fixing Issue #1234
+@pytest.mark.issue(1234)
+def test_issue1234():
+    ...
+```
+
+Test for the bug you're fixing, and make sure the test fails. Next, add and
+commit your test file. Finally, fix the bug, make sure your test passes and
+reference the issue number in your pull request description.
 
 📖 **For more information on how to add tests, check out the [tests README](spacy/tests/README.md).**
 
@@ -162,6 +172,11 @@ spaCy uses [`black`](https://github.com/ambv/black) for code
 formatting and [`flake8`](http://flake8.pycqa.org/en/latest/) for linting its
 Python modules. If you've built spaCy from source, you'll already have both
 tools installed.
+
+As a general rule of thumb, we use f-strings for any formatting of strings.
+One exception are calls to Python's `logging` functionality.
+To avoid unnecessary string conversions in these cases, we use string formatting
+templates with `%s` and `%d` etc.
 
 **⚠️ Note that formatting and linting is currently only possible for Python
 modules in `.py` files, not Cython modules in `.pyx` and `.pxd` files.**
@@ -223,7 +238,7 @@ also want to keep an eye on unused declared variables or repeated
 (i.e. overwritten) dictionary keys. If your code was formatted with `black`
 (see above), you shouldn't see any formatting-related warnings.
 
-The [`.flake8`](.flake8) config defines the configuration we use for this
+The `flake8` section in [`setup.cfg`](setup.cfg) defines the configuration we use for this
 codebase. For example, we're not super strict about the line length, and we're
 excluding very large files like lemmatization and tokenizer exception tables.
 
@@ -261,7 +276,8 @@ except:  # noqa: E722
 
 ### Python conventions
 
-All Python code must be written **compatible with Python 3.6+**.
+All Python code must be written **compatible with Python 3.8+**. More detailed
+code conventions can be found in the [developer docs](https://github.com/explosion/spaCy/blob/master/extra/DEVELOPER_DOCS/Code%20Conventions.md).
 
 #### I/O and handling paths
 

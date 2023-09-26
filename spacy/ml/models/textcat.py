@@ -1,21 +1,38 @@
 from functools import partial
-from typing import Optional, List
+from typing import List, Optional, cast
 
-from thinc.types import Floats2d
-from thinc.api import Model, reduce_mean, Linear, list2ragged, Logistic
-from thinc.api import chain, concatenate, clone, Dropout, ParametricAttention
-from thinc.api import SparseLinear, Softmax, softmax_activation, Maxout, reduce_sum
-from thinc.api import with_cpu, Relu, residual, LayerNorm, resizable
+from thinc.api import (
+    Dropout,
+    LayerNorm,
+    Linear,
+    Logistic,
+    Maxout,
+    Model,
+    ParametricAttention,
+    Relu,
+    Softmax,
+    SparseLinear,
+    chain,
+    clone,
+    concatenate,
+    list2ragged,
+    reduce_mean,
+    reduce_sum,
+    residual,
+    resizable,
+    softmax_activation,
+    with_cpu,
+)
 from thinc.layers.chain import init as init_chain
-from thinc.layers.resizable import resize_model, resize_linear_weighted
+from thinc.layers.resizable import resize_linear_weighted, resize_model
+from thinc.types import Floats2d
 
 from ...attrs import ORTH
+from ...tokens import Doc
 from ...util import registry
 from ..extract_ngrams import extract_ngrams
 from ..staticvectors import StaticVectors
-from ...tokens import Doc
 from .tok2vec import get_tok2vec_width
-
 
 NEG_VALUE = -5000
 
@@ -59,7 +76,8 @@ def build_simple_cnn_text_classifier(
             resizable_layer=resizable_layer,
         )
     model.set_ref("tok2vec", tok2vec)
-    model.set_dim("nO", nO)  # type: ignore  # TODO: remove type ignore once Thinc has been updated
+    if nO is not None:
+        model.set_dim("nO", cast(int, nO))
     model.attrs["multi_label"] = not exclusive_classes
     return model
 
@@ -85,7 +103,7 @@ def build_bow_text_classifier(
         if not no_output_layer:
             fill_defaults["b"] = NEG_VALUE
             output_layer = softmax_activation() if exclusive_classes else Logistic()
-        resizable_layer = resizable(  # type: ignore[var-annotated]
+        resizable_layer: Model[Floats2d, Floats2d] = resizable(
             sparse_linear,
             resize_layer=partial(resize_linear_weighted, fill_defaults=fill_defaults),
         )
@@ -93,7 +111,8 @@ def build_bow_text_classifier(
         model = with_cpu(model, model.ops)
         if output_layer:
             model = model >> with_cpu(output_layer, output_layer.ops)
-    model.set_dim("nO", nO)  # type: ignore[arg-type]
+    if nO is not None:
+        model.set_dim("nO", cast(int, nO))
     model.set_ref("output_layer", sparse_linear)
     model.attrs["multi_label"] = not exclusive_classes
     model.attrs["resize_output"] = partial(
@@ -129,8 +148,8 @@ def build_text_classifier_v2(
             output_layer = Linear(nO=nO, nI=nO_double) >> Logistic()
         model = (linear_model | cnn_model) >> output_layer
         model.set_ref("tok2vec", tok2vec)
-    if model.has_dim("nO") is not False:
-        model.set_dim("nO", nO)  # type: ignore[arg-type]
+    if model.has_dim("nO") is not False and nO is not None:
+        model.set_dim("nO", cast(int, nO))
     model.set_ref("output_layer", linear_model.get_ref("output_layer"))
     model.set_ref("attention_layer", attention_layer)
     model.set_ref("maxout_layer", maxout_layer)
@@ -164,7 +183,7 @@ def build_text_classifier_lowdata(
             >> list2ragged()
             >> ParametricAttention(width)
             >> reduce_sum()
-            >> residual(Relu(width, width)) ** 2  # type: ignore[arg-type]
+            >> residual(Relu(width, width)) ** 2
             >> Linear(nO, width)
         )
         if dropout:

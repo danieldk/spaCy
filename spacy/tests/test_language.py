@@ -1,19 +1,27 @@
 import itertools
 import logging
 from unittest import mock
+
 import pytest
-from spacy.language import Language
-from spacy.tokens import Doc, Span
-from spacy.vocab import Vocab
-from spacy.training import Example
-from spacy.lang.en import English
-from spacy.lang.de import German
-from spacy.util import registry, ignore_error, raise_error, find_matching_language
+from thinc.api import Config, CupyOps, NumpyOps, get_array_module, get_current_ops
+
 import spacy
-from thinc.api import CupyOps, NumpyOps, get_current_ops
+from spacy.lang.de import German
+from spacy.lang.en import English
+from spacy.language import Language
+from spacy.scorer import Scorer
+from spacy.tokens import Doc, Span
+from spacy.training import Example
+from spacy.util import (
+    find_matching_language,
+    ignore_error,
+    load_model_from_config,
+    raise_error,
+    registry,
+)
+from spacy.vocab import Vocab
 
 from .util import add_vecs_to_vocab, assert_docs_equal
-
 
 try:
     import torch
@@ -23,6 +31,57 @@ try:
     torch.set_num_interop_threads(1)
 except ImportError:
     pass
+
+TAGGER_CFG_STRING = """
+    [nlp]
+    lang = "en"
+    pipeline = ["tok2vec","tagger"]
+
+    [components]
+
+    [components.tagger]
+    factory = "tagger"
+
+    [components.tagger.model]
+    @architectures = "spacy.Tagger.v2"
+    nO = null
+
+    [components.tagger.model.tok2vec]
+    @architectures = "spacy.Tok2VecListener.v1"
+    width = ${components.tok2vec.model.encode.width}
+
+    [components.tok2vec]
+    factory = "tok2vec"
+
+    [components.tok2vec.model]
+    @architectures = "spacy.Tok2Vec.v2"
+
+    [components.tok2vec.model.embed]
+    @architectures = "spacy.MultiHashEmbed.v1"
+    width = ${components.tok2vec.model.encode.width}
+    rows = [2000, 1000, 1000, 1000]
+    attrs = ["NORM", "PREFIX", "SUFFIX", "SHAPE"]
+    include_static_vectors = false
+
+    [components.tok2vec.model.encode]
+    @architectures = "spacy.MaxoutWindowEncoder.v2"
+    width = 96
+    depth = 4
+    window_size = 1
+    maxout_pieces = 3
+    """
+
+
+TAGGER_TRAIN_DATA = [
+    ("I like green eggs", {"tags": ["N", "V", "J", "N"]}),
+    ("Eat blue ham", {"tags": ["V", "J", "N"]}),
+]
+
+
+TAGGER_TRAIN_DATA = [
+    ("I like green eggs", {"tags": ["N", "V", "J", "N"]}),
+    ("Eat blue ham", {"tags": ["V", "J", "N"]}),
+]
 
 
 def evil_component(doc):
@@ -45,7 +104,7 @@ def assert_sents_error(doc):
 
 def warn_error(proc_name, proc, docs, e):
     logger = logging.getLogger("spacy")
-    logger.warning(f"Trouble with component {proc_name}.")
+    logger.warning("Trouble with component %s.", proc_name)
 
 
 @pytest.fixture
@@ -82,6 +141,44 @@ def test_language_update(nlp):
         example = Example.from_dict(doc, None)
     with pytest.raises(KeyError):
         example = Example.from_dict(doc, wrongkeyannots)
+
+
+def test_language_update_updates():
+    config = Config().from_str(TAGGER_CFG_STRING)
+    nlp = load_model_from_config(config, auto_fill=True, validate=True)
+
+    train_examples = []
+    for t in TAGGER_TRAIN_DATA:
+        train_examples.append(Example.from_dict(nlp.make_doc(t[0]), t[1]))
+
+    optimizer = nlp.initialize(get_examples=lambda: train_examples)
+
+    docs_before_update = list(nlp.pipe([eg.predicted.copy() for eg in train_examples]))
+    nlp.update(train_examples, sgd=optimizer)
+    docs_after_update = list(nlp.pipe([eg.predicted.copy() for eg in train_examples]))
+
+    xp = get_array_module(docs_after_update[0].tensor)
+    assert xp.any(
+        xp.not_equal(docs_before_update[0].tensor, docs_after_update[0].tensor)
+    )
+
+
+def test_language_update_does_not_update_with_sgd_false():
+    config = Config().from_str(TAGGER_CFG_STRING)
+    nlp = load_model_from_config(config, auto_fill=True, validate=True)
+
+    train_examples = []
+    for t in TAGGER_TRAIN_DATA:
+        train_examples.append(Example.from_dict(nlp.make_doc(t[0]), t[1]))
+
+    nlp.initialize(get_examples=lambda: train_examples)
+
+    docs_before_update = list(nlp.pipe([eg.predicted.copy() for eg in train_examples]))
+    nlp.update(train_examples, sgd=False)
+    docs_after_update = list(nlp.pipe([eg.predicted.copy() for eg in train_examples]))
+
+    xp = get_array_module(docs_after_update[0].tensor)
+    xp.testing.assert_equal(docs_before_update[0].tensor, docs_after_update[0].tensor)
 
 
 def test_language_evaluate(nlp):
@@ -124,6 +221,112 @@ def test_evaluate_no_pipe(nlp):
     doc = nlp(text)
     nlp.add_pipe("test_evaluate_no_pipe")
     nlp.evaluate([Example.from_dict(doc, annots)])
+
+
+def test_evaluate_textcat_multilabel(en_vocab):
+    """Test that evaluate works with a multilabel textcat pipe."""
+    nlp = Language(en_vocab)
+    textcat_multilabel = nlp.add_pipe("textcat_multilabel")
+    for label in ("FEATURE", "REQUEST", "BUG", "QUESTION"):
+        textcat_multilabel.add_label(label)
+    nlp.initialize()
+
+    annots = {"cats": {"FEATURE": 1.0, "QUESTION": 1.0}}
+    doc = nlp.make_doc("hello world")
+    example = Example.from_dict(doc, annots)
+    scores = nlp.evaluate([example])
+    labels = nlp.get_pipe("textcat_multilabel").labels
+    for label in labels:
+        assert scores["cats_f_per_type"].get(label) is not None
+    for key in example.reference.cats.keys():
+        if key not in labels:
+            assert scores["cats_f_per_type"].get(key) is None
+
+
+def test_evaluate_multiple_textcat_final(en_vocab):
+    """Test that evaluate evaluates the final textcat component in a pipeline
+    with more than one textcat or textcat_multilabel."""
+    nlp = Language(en_vocab)
+    textcat = nlp.add_pipe("textcat")
+    for label in ("POSITIVE", "NEGATIVE"):
+        textcat.add_label(label)
+    textcat_multilabel = nlp.add_pipe("textcat_multilabel")
+    for label in ("FEATURE", "REQUEST", "BUG", "QUESTION"):
+        textcat_multilabel.add_label(label)
+    nlp.initialize()
+
+    annots = {
+        "cats": {
+            "POSITIVE": 1.0,
+            "NEGATIVE": 0.0,
+            "FEATURE": 1.0,
+            "QUESTION": 1.0,
+            "POSITIVE": 1.0,
+            "NEGATIVE": 0.0,
+        }
+    }
+    doc = nlp.make_doc("hello world")
+    example = Example.from_dict(doc, annots)
+    scores = nlp.evaluate([example])
+    # get the labels from the final pipe
+    labels = nlp.get_pipe(nlp.pipe_names[-1]).labels
+    for label in labels:
+        assert scores["cats_f_per_type"].get(label) is not None
+    for key in example.reference.cats.keys():
+        if key not in labels:
+            assert scores["cats_f_per_type"].get(key) is None
+
+
+def test_evaluate_multiple_textcat_separate(en_vocab):
+    """Test that evaluate can evaluate multiple textcat components separately
+    with custom scorers."""
+
+    def custom_textcat_score(examples, **kwargs):
+        scores = Scorer.score_cats(
+            examples,
+            "cats",
+            multi_label=False,
+            **kwargs,
+        )
+        return {f"custom_{k}": v for k, v in scores.items()}
+
+    @spacy.registry.scorers("test_custom_textcat_scorer")
+    def make_custom_textcat_scorer():
+        return custom_textcat_score
+
+    nlp = Language(en_vocab)
+    textcat = nlp.add_pipe(
+        "textcat",
+        config={"scorer": {"@scorers": "test_custom_textcat_scorer"}},
+    )
+    for label in ("POSITIVE", "NEGATIVE"):
+        textcat.add_label(label)
+    textcat_multilabel = nlp.add_pipe("textcat_multilabel")
+    for label in ("FEATURE", "REQUEST", "BUG", "QUESTION"):
+        textcat_multilabel.add_label(label)
+    nlp.initialize()
+
+    annots = {
+        "cats": {
+            "POSITIVE": 1.0,
+            "NEGATIVE": 0.0,
+            "FEATURE": 1.0,
+            "QUESTION": 1.0,
+            "POSITIVE": 1.0,
+            "NEGATIVE": 0.0,
+        }
+    }
+    doc = nlp.make_doc("hello world")
+    example = Example.from_dict(doc, annots)
+    scores = nlp.evaluate([example])
+    # check custom scores for the textcat pipe
+    assert "custom_cats_f_per_type" in scores
+    labels = nlp.get_pipe("textcat").labels
+    assert set(scores["custom_cats_f_per_type"].keys()) == set(labels)
+    # check default scores for the textcat_multilabel pipe
+    assert "cats_f_per_type" in scores
+    labels = nlp.get_pipe("textcat_multilabel").labels
+    assert set(scores["cats_f_per_type"].keys()) == set(labels)
 
 
 def vector_modification_pipe(doc):
@@ -551,11 +754,12 @@ def test_spacy_blank():
         ("fra", "fr"),
         ("fre", "fr"),
         ("iw", "he"),
+        ("is", "isl"),
         ("mo", "ro"),
-        ("mul", "xx"),
+        ("mul", "mul"),
         ("no", "nb"),
         ("pt-BR", "pt"),
-        ("xx", "xx"),
+        ("xx", "mul"),
         ("zh-Hans", "zh"),
         ("zh-Hant", None),
         ("zxx", None),
@@ -576,11 +780,11 @@ def test_language_matching(lang, target):
         ("fra", "fr"),
         ("fre", "fr"),
         ("iw", "he"),
+        ("is", "isl"),
         ("mo", "ro"),
-        ("mul", "xx"),
+        ("xx", "mul"),
         ("no", "nb"),
         ("pt-BR", "pt"),
-        ("xx", "xx"),
         ("zh-Hans", "zh"),
     ],
 )
@@ -659,3 +863,99 @@ def test_multiprocessing_gpu_warning(nlp2, texts):
             # Trigger multi-processing.
             for _ in docs:
                 pass
+
+
+def test_dot_in_factory_names(nlp):
+    Language.component("my_evil_component", func=evil_component)
+    nlp.add_pipe("my_evil_component")
+
+    with pytest.raises(ValueError, match="not permitted"):
+        Language.component("my.evil.component.v1", func=evil_component)
+
+    with pytest.raises(ValueError, match="not permitted"):
+        Language.factory("my.evil.component.v1", func=evil_component)
+
+
+def test_component_return():
+    """Test that an error is raised if components return a type other than a
+    doc."""
+    nlp = English()
+
+    @Language.component("test_component_good_pipe")
+    def good_pipe(doc):
+        return doc
+
+    nlp.add_pipe("test_component_good_pipe")
+    nlp("text")
+    nlp.remove_pipe("test_component_good_pipe")
+
+    @Language.component("test_component_bad_pipe")
+    def bad_pipe(doc):
+        return doc.text
+
+    nlp.add_pipe("test_component_bad_pipe")
+    with pytest.raises(ValueError, match="instead of a Doc"):
+        nlp("text")
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("teacher_tagger_name", ["tagger", "teacher_tagger"])
+def test_distill(teacher_tagger_name):
+    teacher = English()
+    teacher_tagger = teacher.add_pipe("tagger", name=teacher_tagger_name)
+    train_examples = []
+    for t in TAGGER_TRAIN_DATA:
+        train_examples.append(Example.from_dict(teacher.make_doc(t[0]), t[1]))
+
+    optimizer = teacher.initialize(get_examples=lambda: train_examples)
+
+    for i in range(50):
+        losses = {}
+        teacher.update(train_examples, sgd=optimizer, losses=losses)
+    assert losses[teacher_tagger_name] < 0.00001
+
+    student = English()
+    student_tagger = student.add_pipe("tagger")
+    student_tagger.min_tree_freq = 1
+    student_tagger.initialize(
+        get_examples=lambda: train_examples, labels=teacher_tagger.label_data
+    )
+
+    distill_examples = [
+        Example.from_dict(teacher.make_doc(t[0]), {}) for t in TAGGER_TRAIN_DATA
+    ]
+
+    student_to_teacher = (
+        None
+        if teacher_tagger.name == student_tagger.name
+        else {student_tagger.name: teacher_tagger.name}
+    )
+
+    for i in range(50):
+        losses = {}
+        student.distill(
+            teacher,
+            distill_examples,
+            sgd=optimizer,
+            losses=losses,
+            student_to_teacher=student_to_teacher,
+        )
+    assert losses["tagger"] < 0.00001
+
+    test_text = "I like blue eggs"
+    doc = student(test_text)
+    assert doc[0].tag_ == "N"
+    assert doc[1].tag_ == "V"
+    assert doc[2].tag_ == "J"
+    assert doc[3].tag_ == "N"
+
+    # Do an extra update to check if annotates works, though we can't really
+    # validate the resuls, since the annotations are ephemeral.
+    student.distill(
+        teacher,
+        distill_examples,
+        sgd=optimizer,
+        losses=losses,
+        student_to_teacher=student_to_teacher,
+        annotates=["tagger"],
+    )

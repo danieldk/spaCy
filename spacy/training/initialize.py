@@ -1,50 +1,45 @@
-from typing import Union, Dict, Optional, Any, IO, TYPE_CHECKING
-from thinc.api import Config, fix_random_seed, set_gpu_allocator
-from thinc.api import ConfigValidationError
-from pathlib import Path
-import srsly
-import numpy
-import tarfile
 import gzip
-import zipfile
-import tqdm
-from itertools import islice
+import tarfile
 import warnings
+import zipfile
+from itertools import islice
+from pathlib import Path
+from typing import IO, TYPE_CHECKING, Any, Dict, Optional, Union
 
-from .pretrain import get_tok2vec_ref
-from ..lookups import Lookups
-from ..vectors import Vectors, Mode as VectorsMode
+import numpy
+import srsly
+import tqdm
+from thinc.api import Config, ConfigValidationError
+
 from ..errors import Errors, Warnings
-from ..schemas import ConfigSchemaDistillation, ConfigSchemaTraining
-from ..util import registry, load_model_from_config, resolve_dot_names, logger
-from ..util import load_model, ensure_path, get_sourced_components
-from ..util import OOV_RANK, DEFAULT_OOV_PROB
-from . import Example
+from ..lookups import Lookups
+from ..schemas import ConfigSchemaDistill, ConfigSchemaTraining
+from ..util import (
+    DEFAULT_OOV_PROB,
+    OOV_RANK,
+    ensure_path,
+    get_sourced_components,
+    load_model,
+    load_model_from_config,
+    logger,
+    registry,
+    resolve_dot_names,
+    set_gpu_allocator_from_config,
+    set_seed_from_config,
+)
+from ..vectors import Mode as VectorsMode
+from ..vectors import Vectors
+from .pretrain import get_tok2vec_ref
 
 if TYPE_CHECKING:
     from ..language import Language  # noqa: F401
 
 
-def _init_gpu_allocator(config: Config, use_gpu: int):
-    if "gpu_allocator" not in config["training"]:
-        raise ValueError(Errors.E1015.format(value="[training] gpu_allocator"))
-    allocator = config["training"]["gpu_allocator"]
-    if use_gpu >= 0 and allocator:
-        set_gpu_allocator(allocator)
-
-
-def _init_seed(config):
-    if "seed" not in config["training"]:
-        raise ValueError(Errors.E1015.format(value="[training] seed"))
-    if config["training"]["seed"] is not None:
-        fix_random_seed(config["training"]["seed"])
-
-
 def init_nlp_distill(config: Config, teacher: "Language", *, use_gpu: int = -1):
     raw_config = config
     config = raw_config.interpolate()
-    _init_gpu_allocator(config, use_gpu)
-    _init_seed(config)
+    set_seed_from_config(config)
+    set_gpu_allocator_from_config(config, use_gpu)
 
     # Use original config here before it's resolved to functions
     sourced = get_sourced_components(config)
@@ -105,8 +100,8 @@ def init_nlp_distill(config: Config, teacher: "Language", *, use_gpu: int = -1):
 def init_nlp(config: Config, *, use_gpu: int = -1) -> "Language":
     raw_config = config
     config = raw_config.interpolate()
-    _init_gpu_allocator(config, use_gpu)
-    _init_seed(config)
+    set_seed_from_config(config)
+    set_gpu_allocator_from_config(config, use_gpu)
     # Use original config here before it's resolved to functions
     sourced = get_sourced_components(config)
     nlp = load_model_from_config(raw_config, auto_fill=True)
@@ -133,6 +128,86 @@ def init_nlp(config: Config, *, use_gpu: int = -1) -> "Language":
     frozen_components = T["frozen_components"]
     # Sourced components that require resume_training
     resume_components = [p for p in sourced if p not in frozen_components]
+    logger.info("Pipeline: %s", nlp.pipe_names)
+    if resume_components:
+        with nlp.select_pipes(enable=resume_components):
+            logger.info("Resuming training for: %s", resume_components)
+            nlp.resume_training(sgd=optimizer)
+    # Make sure that internal component names are synced and listeners are
+    # defined before initializing further
+    nlp._link_components()
+    with nlp.select_pipes(disable=[*frozen_components, *resume_components]):
+        if T["max_epochs"] == -1:
+            sample_size = 100
+            logger.debug(
+                "Due to streamed train corpus, using only first %s examples for initialization. "
+                "If necessary, provide all labels in [initialize]. "
+                "More info: https://spacy.io/api/cli#init_labels",
+                sample_size,
+            )
+            nlp.initialize(
+                lambda: islice(train_corpus(nlp), sample_size), sgd=optimizer
+            )
+        else:
+            nlp.initialize(lambda: train_corpus(nlp), sgd=optimizer)
+        logger.info("Initialized pipeline components: %s", nlp.pipe_names)
+    # Detect components with listeners that are not frozen consistently
+    for name, proc in nlp.pipeline:
+        for listener in getattr(
+            proc, "listening_components", []
+        ):  # e.g. tok2vec/transformer
+            # Don't warn about components not in the pipeline
+            if listener not in nlp.pipe_names:
+                continue
+            if listener in frozen_components and name not in frozen_components:
+                logger.warning(Warnings.W087.format(name=name, listener=listener))
+            # We always check this regardless, in case user freezes tok2vec
+            if listener not in frozen_components and name in frozen_components:
+                if name not in T["annotating_components"]:
+                    logger.warning(Warnings.W086.format(name=name, listener=listener))
+    return nlp
+
+
+def init_nlp_student(
+    config: Config, teacher: "Language", *, use_gpu: int = -1
+) -> "Language":
+    """Initialize student pipeline for distillation.
+
+    config (Config): Student model configuration.
+    teacher (Language): The teacher pipeline to distill from.
+    use_gpu (int): Whether to train on GPU. Make sure to call require_gpu
+        before calling this function.
+    """
+    raw_config = config
+    config = raw_config.interpolate()
+    set_seed_from_config(config)
+    set_gpu_allocator_from_config(config, use_gpu)
+
+    # Use original config here before it's resolved to functions
+    sourced = get_sourced_components(config)
+    nlp = load_model_from_config(raw_config, auto_fill=True)
+    logger.info("Set up nlp object from config")
+    config = nlp.config.interpolate()
+    # Resolve all training-relevant sections using the filled nlp config
+    T = registry.resolve(config["training"], schema=ConfigSchemaTraining)
+    D = registry.resolve(config["distillation"], schema=ConfigSchemaDistill)
+    dot_names = [T["dev_corpus"]]
+    if not isinstance(D["corpus"], str):
+        raise ConfigValidationError(
+            desc=Errors.E897.format(field="distillation.corpus", type=type(D["corpus"]))
+        )
+    if not isinstance(T["dev_corpus"], str):
+        raise ConfigValidationError(
+            desc=Errors.E897.format(
+                field="training.dev_corpus", type=type(T["dev_corpus"])
+            )
+        )
+    (dev_corpus,) = resolve_dot_names(config, dot_names)
+    optimizer = T["optimizer"]
+    # Components that shouldn't be updated during training
+    frozen_components = T["frozen_components"]
+    # Sourced components that require resume_training
+    resume_components = [p for p in sourced if p not in frozen_components]
     logger.info(f"Pipeline: {nlp.pipe_names}")
     if resume_components:
         with nlp.select_pipes(enable=resume_components):
@@ -140,7 +215,27 @@ def init_nlp(config: Config, *, use_gpu: int = -1) -> "Language":
             nlp.resume_training(sgd=optimizer)
     # Make sure that listeners are defined before initializing further
     nlp._link_components()
+
+    # Get teacher labels to initialize student with.
+    student_to_teacher = D["student_to_teacher"]
+    teacher_pipes = dict(teacher.pipeline)
+    labels = {}
+    for name, pipe in nlp.pipeline:
+        # Copy teacher labels.
+        teacher_pipe_name = (
+            student_to_teacher[name] if name in student_to_teacher else name
+        )
+        teacher_pipe = teacher_pipes.get(teacher_pipe_name, None)
+        if (
+            teacher_pipe is not None
+            and getattr(teacher_pipe, "label_data", None) is not None
+        ):
+            labels[name] = teacher_pipe.label_data  # type: ignore[attr-defined]
+
     with nlp.select_pipes(disable=[*frozen_components, *resume_components]):
+        # Initialize on the dev corpus, since the distillation corpus does
+        # usually not have labels. Since we copy the labels from the teacher
+        # pipe, the dev data does not have to be exhaustive.
         if T["max_epochs"] == -1:
             sample_size = 100
             logger.debug(
@@ -148,11 +243,9 @@ def init_nlp(config: Config, *, use_gpu: int = -1) -> "Language":
                 f"examples for initialization. If necessary, provide all labels "
                 f"in [initialize]. More info: https://spacy.io/api/cli#init_labels"
             )
-            nlp.initialize(
-                lambda: islice(train_corpus(nlp), sample_size), sgd=optimizer
-            )
+            nlp.initialize(lambda: islice(dev_corpus(nlp), sample_size), sgd=optimizer)
         else:
-            nlp.initialize(lambda: train_corpus(nlp), sgd=optimizer)
+            nlp.initialize(lambda: dev_corpus(nlp), sgd=optimizer, labels=labels)
         logger.info(f"Initialized pipeline components: {nlp.pipe_names}")
     # Detect components with listeners that are not frozen consistently
     for name, proc in nlp.pipeline:
@@ -180,7 +273,7 @@ def init_vocab(
 ) -> None:
     if lookups:
         nlp.vocab.lookups = lookups
-        logger.info(f"Added vocab lookups: {', '.join(lookups.tables)}")
+        logger.info("Added vocab lookups: %s", ", ".join(lookups.tables))
     data_path = ensure_path(data)
     if data_path is not None:
         lex_attrs = srsly.read_jsonl(data_path)
@@ -196,17 +289,18 @@ def init_vocab(
         else:
             oov_prob = DEFAULT_OOV_PROB
         nlp.vocab.cfg.update({"oov_prob": oov_prob})
-        logger.info(f"Added {len(nlp.vocab)} lexical entries to the vocab")
+        logger.info("Added %d lexical entries to the vocab", len(nlp.vocab))
     logger.info("Created vocabulary")
     if vectors is not None:
         load_vectors_into_model(nlp, vectors)
-        logger.info(f"Added vectors: {vectors}")
+        logger.info("Added vectors: %s", vectors)
     # warn if source model vectors are not identical
     sourced_vectors_hashes = nlp.meta.pop("_sourced_vectors_hashes", {})
-    vectors_hash = hash(nlp.vocab.vectors.to_bytes())
-    for sourced_component, sourced_vectors_hash in sourced_vectors_hashes.items():
-        if vectors_hash != sourced_vectors_hash:
-            warnings.warn(Warnings.W113.format(name=sourced_component))
+    if len(sourced_vectors_hashes) > 0:
+        vectors_hash = hash(nlp.vocab.vectors.to_bytes(exclude=["strings"]))
+        for sourced_component, sourced_vectors_hash in sourced_vectors_hashes.items():
+            if vectors_hash != sourced_vectors_hash:
+                warnings.warn(Warnings.W113.format(name=sourced_component))
     logger.info("Finished initializing nlp object")
 
 
@@ -235,7 +329,7 @@ def load_vectors_into_model(
         len(vectors_nlp.vocab.vectors.keys()) == 0
         and vectors_nlp.vocab.vectors.mode != VectorsMode.floret
     ) or (
-        vectors_nlp.vocab.vectors.data.shape[0] == 0
+        vectors_nlp.vocab.vectors.shape[0] == 0
         and vectors_nlp.vocab.vectors.mode == VectorsMode.floret
     ):
         logger.warning(Warnings.W112.format(name=name))
@@ -262,7 +356,7 @@ def init_tok2vec(
     if weights_data is not None:
         layer = get_tok2vec_ref(nlp, P)
         layer.from_bytes(weights_data)
-        logger.info(f"Loaded pretrained weights from {init_tok2vec}")
+        logger.info("Loaded pretrained weights from %s", init_tok2vec)
         return True
     return False
 
@@ -273,26 +367,31 @@ def convert_vectors(
     *,
     truncate: int,
     prune: int,
-    name: Optional[str] = None,
     mode: str = VectorsMode.default,
+    attr: str = "ORTH",
 ) -> None:
     vectors_loc = ensure_path(vectors_loc)
     if vectors_loc and vectors_loc.parts[-1].endswith(".npz"):
+        if attr != "ORTH":
+            raise ValueError(
+                "ORTH is the only attribute supported for vectors in .npz format."
+            )
         nlp.vocab.vectors = Vectors(
             strings=nlp.vocab.strings, data=numpy.load(vectors_loc.open("rb"))
         )
         for lex in nlp.vocab:
             if lex.rank and lex.rank != OOV_RANK:
                 nlp.vocab.vectors.add(lex.orth, row=lex.rank)  # type: ignore[attr-defined]
+        nlp.vocab.deduplicate_vectors()
     else:
         if vectors_loc:
-            logger.info(f"Reading vectors from {vectors_loc}")
+            logger.info("Reading vectors from %s", vectors_loc)
             vectors_data, vector_keys, floret_settings = read_vectors(
                 vectors_loc,
                 truncate,
                 mode=mode,
             )
-            logger.info(f"Loaded vectors from {vectors_loc}")
+            logger.info("Loaded vectors from %s", vectors_loc)
         else:
             vectors_data, vector_keys = (None, None)
         if vector_keys is not None and mode != VectorsMode.floret:
@@ -304,18 +403,17 @@ def convert_vectors(
                 nlp.vocab.vectors = Vectors(
                     strings=nlp.vocab.strings,
                     data=vectors_data,
+                    attr=attr,
                     **floret_settings,
                 )
             else:
                 nlp.vocab.vectors = Vectors(
-                    strings=nlp.vocab.strings, data=vectors_data, keys=vector_keys
+                    strings=nlp.vocab.strings,
+                    data=vectors_data,
+                    keys=vector_keys,
+                    attr=attr,
                 )
-    if name is None:
-        # TODO: Is this correct? Does this matter?
-        nlp.vocab.vectors.name = f"{nlp.meta['lang']}_{nlp.meta['name']}.vectors"
-    else:
-        nlp.vocab.vectors.name = name
-    nlp.meta["vectors"]["name"] = nlp.vocab.vectors.name
+                nlp.vocab.deduplicate_vectors()
     if prune >= 1 and mode != VectorsMode.floret:
         nlp.vocab.prune_vectors(prune)
 
@@ -406,3 +504,5 @@ def ensure_shape(vectors_loc):
         # store all the results in a list in memory
         lines2 = open_file(vectors_loc)
         yield from lines2
+        lines2.close()
+    lines.close()

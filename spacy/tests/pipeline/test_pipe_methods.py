@@ -1,9 +1,19 @@
+import gc
+
+import numpy
 import pytest
+from thinc.api import get_current_ops
+
+import spacy
+from spacy.lang.en import English
+from spacy.lang.en.syntax_iterators import noun_chunks
 from spacy.language import Language
 from spacy.pipeline import TrainablePipe
+from spacy.strings import StringStore
+from spacy.tokens import Doc
 from spacy.training import Example
-from spacy.util import SimpleFrozenList, get_arg_names
-from spacy.lang.en import English
+from spacy.util import SimpleFrozenList, get_arg_names, make_tempdir
+from spacy.vocab import Vocab
 
 
 @pytest.fixture
@@ -19,6 +29,138 @@ def new_pipe(doc):
 @Language.component("other_pipe")
 def other_pipe(doc):
     return doc
+
+
+@pytest.mark.issue(1506)
+def test_issue1506():
+    def string_generator():
+        for _ in range(10001):
+            yield "It's sentence produced by that bug."
+        for _ in range(10001):
+            yield "I erase some hbdsaj lemmas."
+        for _ in range(10001):
+            yield "I erase lemmas."
+        for _ in range(10001):
+            yield "It's sentence produced by that bug."
+        for _ in range(10001):
+            yield "It's sentence produced by that bug."
+
+    nlp = English()
+    for i, d in enumerate(nlp.pipe(string_generator())):
+        # We should run cleanup more than one time to actually cleanup data.
+        # In first run — clean up only mark strings as «not hitted».
+        if i == 10000 or i == 20000 or i == 30000:
+            gc.collect()
+        for t in d:
+            str(t.lemma_)
+
+
+@pytest.mark.issue(1654)
+def test_issue1654():
+    nlp = Language(Vocab())
+    assert not nlp.pipeline
+
+    @Language.component("component")
+    def component(doc):
+        return doc
+
+    nlp.add_pipe("component", name="1")
+    nlp.add_pipe("component", name="2", after="1")
+    nlp.add_pipe("component", name="3", after="2")
+    assert nlp.pipe_names == ["1", "2", "3"]
+    nlp2 = Language(Vocab())
+    assert not nlp2.pipeline
+    nlp2.add_pipe("component", name="3")
+    nlp2.add_pipe("component", name="2", before="3")
+    nlp2.add_pipe("component", name="1", before="2")
+    assert nlp2.pipe_names == ["1", "2", "3"]
+
+
+@pytest.mark.issue(3880)
+def test_issue3880():
+    """Test that `nlp.pipe()` works when an empty string ends the batch.
+
+    Fixed in v7.0.5 of Thinc.
+    """
+    texts = ["hello", "world", "", ""]
+    nlp = English()
+    nlp.add_pipe("parser").add_label("dep")
+    nlp.add_pipe("ner").add_label("PERSON")
+    nlp.add_pipe("tagger").add_label("NN")
+    nlp.initialize()
+    for doc in nlp.pipe(texts):
+        pass
+
+
+@pytest.mark.issue(5082)
+def test_issue5082():
+    # Ensure the 'merge_entities' pipeline does something sensible for the vectors of the merged tokens
+    nlp = English()
+    vocab = nlp.vocab
+    array1 = numpy.asarray([0.1, 0.5, 0.8], dtype=numpy.float32)
+    array2 = numpy.asarray([-0.2, -0.6, -0.9], dtype=numpy.float32)
+    array3 = numpy.asarray([0.3, -0.1, 0.7], dtype=numpy.float32)
+    array4 = numpy.asarray([0.5, 0, 0.3], dtype=numpy.float32)
+    array34 = numpy.asarray([0.4, -0.05, 0.5], dtype=numpy.float32)
+    vocab.set_vector("I", array1)
+    vocab.set_vector("like", array2)
+    vocab.set_vector("David", array3)
+    vocab.set_vector("Bowie", array4)
+    text = "I like David Bowie"
+    patterns = [
+        {"label": "PERSON", "pattern": [{"LOWER": "david"}, {"LOWER": "bowie"}]}
+    ]
+    ruler = nlp.add_pipe("entity_ruler")
+    ruler.add_patterns(patterns)
+    parsed_vectors_1 = [t.vector for t in nlp(text)]
+    assert len(parsed_vectors_1) == 4
+    ops = get_current_ops()
+    numpy.testing.assert_array_equal(ops.to_numpy(parsed_vectors_1[0]), array1)
+    numpy.testing.assert_array_equal(ops.to_numpy(parsed_vectors_1[1]), array2)
+    numpy.testing.assert_array_equal(ops.to_numpy(parsed_vectors_1[2]), array3)
+    numpy.testing.assert_array_equal(ops.to_numpy(parsed_vectors_1[3]), array4)
+    nlp.add_pipe("merge_entities")
+    parsed_vectors_2 = [t.vector for t in nlp(text)]
+    assert len(parsed_vectors_2) == 3
+    numpy.testing.assert_array_equal(ops.to_numpy(parsed_vectors_2[0]), array1)
+    numpy.testing.assert_array_equal(ops.to_numpy(parsed_vectors_2[1]), array2)
+    numpy.testing.assert_array_equal(ops.to_numpy(parsed_vectors_2[2]), array34)
+
+
+@pytest.mark.issue(5458)
+def test_issue5458():
+    # Test that the noun chuncker does not generate overlapping spans
+    # fmt: off
+    words = ["In", "an", "era", "where", "markets", "have", "brought", "prosperity", "and", "empowerment", "."]
+    vocab = Vocab(strings=StringStore(words))
+    deps = ["ROOT", "det", "pobj", "advmod", "nsubj", "aux", "relcl", "dobj", "cc", "conj", "punct"]
+    pos = ["ADP", "DET", "NOUN", "ADV", "NOUN", "AUX", "VERB", "NOUN", "CCONJ", "NOUN", "PUNCT"]
+    heads = [0, 2, 0, 9, 6, 6, 2, 6, 7, 7, 0]
+    # fmt: on
+    en_doc = Doc(vocab, words=words, pos=pos, heads=heads, deps=deps)
+    en_doc.noun_chunks_iterator = noun_chunks
+
+    # if there are overlapping spans, this will fail with an E102 error "Can't merge non-disjoint spans"
+    nlp = English()
+    merge_nps = nlp.create_pipe("merge_noun_chunks")
+    merge_nps(en_doc)
+
+
+def test_multiple_predictions():
+    class DummyPipe(TrainablePipe):
+        def __init__(self):
+            self.model = "dummy_model"
+
+        def predict(self, docs):
+            return ([1, 2, 3], [4, 5, 6])
+
+        def set_annotations(self, docs, scores):
+            return docs
+
+    nlp = Language()
+    doc = nlp.make_doc("foo")
+    dummy_pipe = DummyPipe()
+    dummy_pipe(doc)
 
 
 def test_add_pipe_no_name(nlp):
@@ -45,6 +187,22 @@ def test_add_pipe_last(nlp, name1, name2):
     nlp.add_pipe("new_pipe", name=name1, last=True)
     assert nlp.pipeline[0][0] != name1
     assert nlp.pipeline[-1][0] == name1
+
+
+@pytest.mark.parametrize("name1,name2", [("parser", "lambda_pipe")])
+def test_add_pipe_false(nlp, name1, name2):
+    Language.component("new_pipe2", func=lambda doc: doc)
+    nlp.add_pipe("new_pipe2", name=name2)
+    with pytest.raises(
+        ValueError,
+        match="The 'last' parameter should be 'None' or 'True', but found 'False'",
+    ):
+        nlp.add_pipe("new_pipe", name=name1, last=False)
+    with pytest.raises(
+        ValueError,
+        match="The 'first' parameter should be 'None' or 'True', but found 'False'",
+    ):
+        nlp.add_pipe("new_pipe", name=name1, first=False)
 
 
 def test_cant_add_pipe_first_and_last(nlp):
@@ -269,8 +427,6 @@ def test_add_pipe_before_after():
         nlp.add_pipe("entity_ruler", before="ner", after=2)
     with pytest.raises(ValueError):
         nlp.add_pipe("entity_ruler", before=True)
-    with pytest.raises(ValueError):
-        nlp.add_pipe("entity_ruler", first=False)
 
 
 def test_disable_enable_pipes():
@@ -388,17 +544,6 @@ def test_pipe_label_data_no_labels(pipe):
         assert "labels" not in get_arg_names(initialize)
 
 
-def test_warning_pipe_begin_training():
-    with pytest.warns(UserWarning, match="begin_training"):
-
-        class IncompatPipe(TrainablePipe):
-            def __init__(self):
-                ...
-
-            def begin_training(*args, **kwargs):
-                ...
-
-
 def test_pipe_methods_initialize():
     """Test that the [initialize] config reflects the components correctly."""
     nlp = Language()
@@ -462,3 +607,86 @@ def test_update_with_annotates():
             assert results[component] == "".join(eg.predicted.text for eg in examples)
         for component in components - set(components_to_annotate):
             assert results[component] == ""
+
+
+@pytest.mark.issue(11443)
+def test_enable_disable_conflict_with_config():
+    """Test conflict between enable/disable w.r.t. `nlp.disabled` set in the config."""
+    nlp = English()
+    nlp.add_pipe("tagger")
+    nlp.add_pipe("senter")
+    nlp.add_pipe("sentencizer")
+
+    with make_tempdir() as tmp_dir:
+        nlp.to_disk(tmp_dir)
+        # Expected to succeed, as config and arguments do not conflict.
+        assert spacy.load(
+            tmp_dir, enable=["tagger"], config={"nlp": {"disabled": ["senter"]}}
+        ).disabled == ["senter", "sentencizer"]
+        # Expected to succeed without warning due to the lack of a conflicting config option.
+        spacy.load(tmp_dir, enable=["tagger"])
+        # Expected to fail due to conflict between enable and disabled.
+        with pytest.raises(ValueError):
+            spacy.load(
+                tmp_dir,
+                enable=["senter"],
+                config={"nlp": {"disabled": ["senter", "tagger"]}},
+            )
+
+
+def test_load_disable_enable():
+    """Tests spacy.load() with dis-/enabling components."""
+
+    base_nlp = English()
+    for pipe in ("sentencizer", "tagger", "parser"):
+        base_nlp.add_pipe(pipe)
+
+    with make_tempdir() as tmp_dir:
+        base_nlp.to_disk(tmp_dir)
+        to_disable = ["parser", "tagger"]
+        to_enable = ["tagger", "parser"]
+        single_str = "tagger"
+
+        # Setting only `disable`.
+        nlp = spacy.load(tmp_dir, disable=to_disable)
+        assert all([comp_name in nlp.disabled for comp_name in to_disable])
+
+        # Setting only `enable`.
+        nlp = spacy.load(tmp_dir, enable=to_enable)
+        assert all(
+            [
+                (comp_name in nlp.disabled) is (comp_name not in to_enable)
+                for comp_name in nlp.component_names
+            ]
+        )
+
+        # Loading with a string representing one component
+        nlp = spacy.load(tmp_dir, exclude=single_str)
+        assert single_str not in nlp.component_names
+
+        nlp = spacy.load(tmp_dir, disable=single_str)
+        assert single_str in nlp.component_names
+        assert single_str not in nlp.pipe_names
+        assert nlp._disabled == {single_str}
+        assert nlp.disabled == [single_str]
+
+        # Testing consistent enable/disable combination.
+        nlp = spacy.load(
+            tmp_dir,
+            enable=to_enable,
+            disable=[
+                comp_name
+                for comp_name in nlp.component_names
+                if comp_name not in to_enable
+            ],
+        )
+        assert all(
+            [
+                (comp_name in nlp.disabled) is (comp_name not in to_enable)
+                for comp_name in nlp.component_names
+            ]
+        )
+
+        # Inconsistent enable/disable combination.
+        with pytest.raises(ValueError):
+            spacy.load(tmp_dir, enable=to_enable, disable=["parser"])

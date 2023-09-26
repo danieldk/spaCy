@@ -2,7 +2,6 @@ import pytest
 
 from spacy.lang.tokenizer_exceptions import BASE_EXCEPTIONS
 
-
 URLS_BASIC = [
     "http://www.nytimes.com/2016/04/20/us/politics/new-york-primary-preview.html?hp&action=click&pgtype=Homepage&clickSource=story-heading&module=a-lede-package-region&region=top-news&WT.nav=top-news&_r=0",
     "www.red-stars.com",
@@ -33,6 +32,9 @@ URLS_SHOULD_MATCH = [
     "http://userid:password@example.com/",
     "http://142.42.1.1/",
     "http://142.42.1.1:8080/",
+    "http://10.140.12.13/foo",
+    "http://10.140.12.13/foo/bar?arg1=baz&arg2=taz",
+    "http://10.1.1.1",
     "http://foo.com/blah_(wikipedia)#cite-1",
     "http://foo.com/blah_(wikipedia)_blah#cite-1",
     "http://foo.com/unicode_(✪)_in_parens",
@@ -94,6 +96,7 @@ URLS_SHOULD_NOT_MATCH = [
     "http://foo.bar/foo(bar)baz quux",
     "http://-error-.invalid/",
     "http://a.b-.co",
+    # Loopback and broadcast addresses should be excluded
     "http://0.0.0.0",
     "http://10.1.1.0",
     "http://10.1.1.255",
@@ -102,7 +105,6 @@ URLS_SHOULD_NOT_MATCH = [
     "http://3628126748",
     "http://.www.foo.bar/",
     "http://.www.foo.bar./",
-    "http://10.1.1.1",
     "NASDAQ:GOOG",
     "http://-a.b.co",
     pytest.param("foo.com", marks=pytest.mark.xfail()),

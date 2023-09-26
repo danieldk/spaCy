@@ -1,20 +1,24 @@
+import logging
+import random
+
 import pytest
 from numpy.testing import assert_equal
-from spacy.attrs import ENT_IOB
+from thinc.api import fix_random_seed
 
-from spacy import util, registry
+from spacy import registry, util
+from spacy.attrs import ENT_IOB
 from spacy.lang.en import English
+from spacy.lang.it import Italian
 from spacy.language import Language
 from spacy.lookups import Lookups
+from spacy.pipeline import EntityRecognizer
 from spacy.pipeline._parser_internals.ner import BiluoPushDown
-from spacy.training import Example
+from spacy.pipeline.ner import DEFAULT_NER_MODEL
 from spacy.tokens import Doc, Span
+from spacy.training import Example, iob_to_biluo, split_bilu_label
 from spacy.vocab import Vocab
-import logging
 
 from ..util import make_tempdir
-from ...pipeline import EntityRecognizer
-from ...pipeline.ner import DEFAULT_NER_MODEL
 
 TRAIN_DATA = [
     ("Who is Shaka Khan?", {"entities": [(7, 17, "PERSON")]}),
@@ -56,6 +60,173 @@ def entity_types(entity_annots):
 def tsys(vocab, entity_types):
     actions = BiluoPushDown.get_actions(entity_types=entity_types)
     return BiluoPushDown(vocab.strings, actions)
+
+
+@pytest.mark.parametrize("label", ["U-JOB-NAME"])
+@pytest.mark.issue(1967)
+def test_issue1967(label):
+    nlp = Language()
+    config = {}
+    ner = nlp.create_pipe("ner", config=config)
+    example = Example.from_dict(
+        Doc(ner.vocab, words=["word"]),
+        {
+            "ids": [0],
+            "words": ["word"],
+            "tags": ["tag"],
+            "heads": [0],
+            "deps": ["dep"],
+            "entities": [label],
+        },
+    )
+    assert "JOB-NAME" in ner.moves.get_actions(examples=[example])[1]
+
+
+@pytest.mark.issue(2179)
+def test_issue2179():
+    """Test that spurious 'extra_labels' aren't created when initializing NER."""
+    nlp = Italian()
+    ner = nlp.add_pipe("ner")
+    ner.add_label("CITIZENSHIP")
+    nlp.initialize()
+    nlp2 = Italian()
+    nlp2.add_pipe("ner")
+    assert len(nlp2.get_pipe("ner").labels) == 0
+    model = nlp2.get_pipe("ner").model
+    model.attrs["resize_output"](model, nlp.get_pipe("ner").moves.n_moves)
+    nlp2.from_bytes(nlp.to_bytes())
+    assert "extra_labels" not in nlp2.get_pipe("ner").cfg
+    assert nlp2.get_pipe("ner").labels == ("CITIZENSHIP",)
+
+
+@pytest.mark.issue(2385)
+def test_issue2385():
+    """Test that IOB tags are correctly converted to BILUO tags."""
+    # fix bug in labels with a 'b' character
+    tags1 = ("B-BRAWLER", "I-BRAWLER", "I-BRAWLER")
+    assert iob_to_biluo(tags1) == ["B-BRAWLER", "I-BRAWLER", "L-BRAWLER"]
+    # maintain support for iob1 format
+    tags2 = ("I-ORG", "I-ORG", "B-ORG")
+    assert iob_to_biluo(tags2) == ["B-ORG", "L-ORG", "U-ORG"]
+    # maintain support for iob2 format
+    tags3 = ("B-PERSON", "I-PERSON", "B-PERSON")
+    assert iob_to_biluo(tags3) == ["B-PERSON", "L-PERSON", "U-PERSON"]
+    # ensure it works with hyphens in the name
+    tags4 = ("B-MULTI-PERSON", "I-MULTI-PERSON", "B-MULTI-PERSON")
+    assert iob_to_biluo(tags4) == ["B-MULTI-PERSON", "L-MULTI-PERSON", "U-MULTI-PERSON"]
+
+
+@pytest.mark.issue(2800)
+def test_issue2800():
+    """Test issue that arises when too many labels are added to NER model.
+    Used to cause segfault.
+    """
+    nlp = English()
+    train_data = []
+    train_data.extend(
+        [Example.from_dict(nlp.make_doc("One sentence"), {"entities": []})]
+    )
+    entity_types = [str(i) for i in range(1000)]
+    ner = nlp.add_pipe("ner")
+    for entity_type in list(entity_types):
+        ner.add_label(entity_type)
+    optimizer = nlp.initialize()
+    for i in range(20):
+        losses = {}
+        random.shuffle(train_data)
+        for example in train_data:
+            nlp.update([example], sgd=optimizer, losses=losses, drop=0.5)
+
+
+@pytest.mark.issue(3209)
+def test_issue3209():
+    """Test issue that occurred in spaCy nightly where NER labels were being
+    mapped to classes incorrectly after loading the model, when the labels
+    were added using ner.add_label().
+    """
+    nlp = English()
+    ner = nlp.add_pipe("ner")
+    ner.add_label("ANIMAL")
+    nlp.initialize()
+    move_names = ["O", "B-ANIMAL", "I-ANIMAL", "L-ANIMAL", "U-ANIMAL"]
+    assert ner.move_names == move_names
+    nlp2 = English()
+    ner2 = nlp2.add_pipe("ner")
+    model = ner2.model
+    model.attrs["resize_output"](model, ner.moves.n_moves)
+    nlp2.from_bytes(nlp.to_bytes())
+    assert ner2.move_names == move_names
+
+
+def test_labels_from_BILUO():
+    """Test that labels are inferred correctly when there's a - in label."""
+    nlp = English()
+    ner = nlp.add_pipe("ner")
+    ner.add_label("LARGE-ANIMAL")
+    nlp.initialize()
+    move_names = [
+        "O",
+        "B-LARGE-ANIMAL",
+        "I-LARGE-ANIMAL",
+        "L-LARGE-ANIMAL",
+        "U-LARGE-ANIMAL",
+    ]
+    labels = {"LARGE-ANIMAL"}
+    assert ner.move_names == move_names
+    assert set(ner.labels) == labels
+
+
+@pytest.mark.issue(4267)
+def test_issue4267():
+    """Test that running an entity_ruler after ner gives consistent results"""
+    nlp = English()
+    ner = nlp.add_pipe("ner")
+    ner.add_label("PEOPLE")
+    nlp.initialize()
+    assert "ner" in nlp.pipe_names
+    # assert that we have correct IOB annotations
+    doc1 = nlp("hi")
+    assert doc1.has_annotation("ENT_IOB")
+    for token in doc1:
+        assert token.ent_iob == 2
+    # add entity ruler and run again
+    patterns = [{"label": "SOFTWARE", "pattern": "spacy"}]
+    ruler = nlp.add_pipe("entity_ruler")
+    ruler.add_patterns(patterns)
+    assert "entity_ruler" in nlp.pipe_names
+    assert "ner" in nlp.pipe_names
+    # assert that we still have correct IOB annotations
+    doc2 = nlp("hi")
+    assert doc2.has_annotation("ENT_IOB")
+    for token in doc2:
+        assert token.ent_iob == 2
+
+
+@pytest.mark.issue(4313)
+def test_issue4313():
+    """This should not crash or exit with some strange error code"""
+    beam_width = 16
+    beam_density = 0.0001
+    nlp = English()
+    config = {
+        "beam_width": beam_width,
+        "beam_density": beam_density,
+    }
+    ner = nlp.add_pipe("beam_ner", config=config)
+    ner.add_label("SOME_LABEL")
+    nlp.initialize()
+    # add a new label to the doc
+    doc = nlp("What do you think about Apple ?")
+    assert len(ner.labels) == 1
+    assert "SOME_LABEL" in ner.labels
+    apple_ent = Span(doc, 5, 6, label="MY_ORG")
+    doc.ents = list(doc.ents) + [apple_ent]
+
+    # ensure the beam_parse still works with the new label
+    docs = [doc]
+    ner.beam_parse(docs, drop=0.0, beam_width=beam_width, beam_density=beam_density)
+    assert len(ner.labels) == 2
+    assert "MY_ORG" in ner.labels
 
 
 def test_get_oracle_moves(tsys, doc, entity_annots):
@@ -149,7 +320,7 @@ def test_oracle_moves_missing_B(en_vocab):
         elif tag == "O":
             moves.add_action(move_types.index("O"), "")
         else:
-            action, label = tag.split("-")
+            action, label = split_bilu_label(tag)
             moves.add_action(move_types.index("B"), label)
             moves.add_action(move_types.index("I"), label)
             moves.add_action(move_types.index("L"), label)
@@ -175,7 +346,7 @@ def test_oracle_moves_whitespace(en_vocab):
         elif tag == "O":
             moves.add_action(move_types.index("O"), "")
         else:
-            action, label = tag.split("-")
+            action, label = split_bilu_label(tag)
             moves.add_action(move_types.index(action), label)
     moves.get_oracle_sequence(example)
 
@@ -242,7 +413,7 @@ def test_train_empty():
         train_examples.append(Example.from_dict(nlp.make_doc(t[0]), t[1]))
     ner = nlp.add_pipe("ner", last=True)
     ner.add_label("PERSON")
-    nlp.initialize()
+    nlp.initialize(get_examples=lambda: train_examples)
     for itn in range(2):
         losses = {}
         batches = util.minibatch(train_examples, size=8)
@@ -369,11 +540,11 @@ def test_block_ner():
     assert [token.ent_type_ for token in doc] == expected_types
 
 
-@pytest.mark.parametrize("use_upper", [True, False])
-def test_overfitting_IO(use_upper):
+def test_overfitting_IO():
+    fix_random_seed(1)
     # Simple test to try and quickly overfit the NER component
     nlp = English()
-    ner = nlp.add_pipe("ner", config={"model": {"use_upper": use_upper}})
+    ner = nlp.add_pipe("ner", config={"model": {}})
     train_examples = []
     for text, annotations in TRAIN_DATA:
         train_examples.append(Example.from_dict(nlp.make_doc(text), annotations))
@@ -405,7 +576,6 @@ def test_overfitting_IO(use_upper):
         assert ents2[0].label_ == "LOC"
         # Ensure that the predictions are still the same, even after adding a new label
         ner2 = nlp2.get_pipe("ner")
-        assert ner2.model.attrs["has_upper"] == use_upper
         ner2.add_label("RANDOM_NEW_LABEL")
         doc3 = nlp2(test_text)
         ents3 = doc3.ents
@@ -445,6 +615,55 @@ def test_overfitting_IO(use_upper):
     assert ents[1].text == "London"
     assert ents[1].label_ == "LOC"
     assert ents[1].kb_id == 0
+
+
+def test_is_distillable():
+    nlp = English()
+    ner = nlp.add_pipe("ner")
+    assert ner.is_distillable
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("max_moves", [0, 1, 5, 100])
+def test_distill(max_moves):
+    teacher = English()
+    teacher_ner = teacher.add_pipe("ner")
+    train_examples = []
+    for text, annotations in TRAIN_DATA:
+        train_examples.append(Example.from_dict(teacher.make_doc(text), annotations))
+        for ent in annotations.get("entities"):
+            teacher_ner.add_label(ent[2])
+
+    optimizer = teacher.initialize(get_examples=lambda: train_examples)
+
+    for i in range(50):
+        losses = {}
+        teacher.update(train_examples, sgd=optimizer, losses=losses)
+    assert losses["ner"] < 0.00001
+
+    student = English()
+    student_ner = student.add_pipe("ner")
+    student_ner.cfg["update_with_oracle_cut_size"] = max_moves
+    student_ner.initialize(
+        get_examples=lambda: train_examples, labels=teacher_ner.label_data
+    )
+
+    distill_examples = [
+        Example.from_dict(teacher.make_doc(t[0]), {}) for t in TRAIN_DATA
+    ]
+
+    for i in range(100):
+        losses = {}
+        student_ner.distill(teacher_ner, distill_examples, sgd=optimizer, losses=losses)
+    assert losses["ner"] < 0.0001
+
+    # test the trained model
+    test_text = "I like London."
+    doc = student(test_text)
+    ents = doc.ents
+    assert len(ents) == 1
+    assert ents[0].text == "London"
+    assert ents[0].label_ == "LOC"
 
 
 def test_beam_ner_scores():
@@ -558,9 +777,9 @@ def test_neg_annotation(neg_key):
     ner.add_label("ORG")
     example = Example.from_dict(neg_doc, {"entities": [(7, 17, "PERSON")]})
     example.reference.spans[neg_key] = [
-        Span(neg_doc, 2, 4, "ORG"),
-        Span(neg_doc, 2, 3, "PERSON"),
-        Span(neg_doc, 1, 4, "PERSON"),
+        Span(example.reference, 2, 4, "ORG"),
+        Span(example.reference, 2, 3, "PERSON"),
+        Span(example.reference, 1, 4, "PERSON"),
     ]
 
     optimizer = nlp.initialize()
@@ -585,7 +804,7 @@ def test_neg_annotation_conflict(neg_key):
     ner.add_label("PERSON")
     ner.add_label("LOC")
     example = Example.from_dict(neg_doc, {"entities": [(7, 17, "PERSON")]})
-    example.reference.spans[neg_key] = [Span(neg_doc, 2, 4, "PERSON")]
+    example.reference.spans[neg_key] = [Span(example.reference, 2, 4, "PERSON")]
     assert len(example.reference.ents) == 1
     assert example.reference.ents[0].text == "Shaka Khan"
     assert example.reference.ents[0].label_ == "PERSON"
@@ -618,7 +837,7 @@ def test_beam_valid_parse(neg_key):
 
     doc = Doc(nlp.vocab, words=tokens)
     example = Example.from_dict(doc, {"ner": iob})
-    neg_span = Span(doc, 50, 53, "ORG")
+    neg_span = Span(example.reference, 50, 53, "ORG")
     example.reference.spans[neg_key] = [neg_span]
 
     optimizer = nlp.initialize()

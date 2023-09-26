@@ -96,7 +96,7 @@ IDS = {
     "ADV": ADV,
     "AUX": AUX,
     "CONJ": CONJ,
-    "CCONJ": CCONJ, # U20
+    "CCONJ": CCONJ,  # U20
     "DET": DET,
     "INTJ": INTJ,
     "NOUN": NOUN,
@@ -421,7 +421,7 @@ IDS = {
     "ccomp": ccomp,
     "complm": complm,
     "conj": conj,
-    "cop": cop, # U20
+    "cop": cop,  # U20
     "csubj": csubj,
     "csubjpass": csubjpass,
     "dep": dep,
@@ -444,8 +444,8 @@ IDS = {
     "num": num,
     "number": number,
     "oprd": oprd,
-    "obj": obj, # U20
-    "obl": obl, # U20
+    "obj": obj,  # U20
+    "obl": obl,  # U20
     "parataxis": parataxis,
     "partmod": partmod,
     "pcomp": pcomp,
@@ -469,11 +469,7 @@ IDS = {
 }
 
 
-def sort_nums(x):
-    return x[1]
-
-
-NAMES = [it[0] for it in sorted(IDS.items(), key=sort_nums)]
+NAMES = {v: k for k, v in IDS.items()}
 # Unfortunate hack here, to work around problem with long cpdef enum
 # (which is generating an enormous amount of C++ in Cython 0.24+)
 # We keep the enum cdef, and just make sure the names are available to Python

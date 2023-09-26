@@ -1,20 +1,30 @@
 import pytest
+from catalogue import RegistryError
 from thinc.api import Config, ConfigValidationError
+
 import spacy
-from spacy.lang.en import English
 from spacy.lang.de import German
-from spacy.language import Language, DEFAULT_CONFIG, DEFAULT_CONFIG_PRETRAIN_PATH
+from spacy.lang.en import English
+from spacy.language import (
+    DEFAULT_CONFIG,
+    DEFAULT_CONFIG_DISTILL_PATH,
+    DEFAULT_CONFIG_PRETRAIN_PATH,
+    Language,
+)
+from spacy.ml.models import (
+    MaxoutWindowEncoder,
+    MultiHashEmbed,
+    build_tb_parser_model,
+    build_Tok2Vec_model,
+)
+from spacy.schemas import ConfigSchema, ConfigSchemaDistill, ConfigSchemaPretrain
+from spacy.training import Example
 from spacy.util import (
-    registry,
-    load_model_from_config,
     load_config,
     load_config_from_str,
+    load_model_from_config,
+    registry,
 )
-from spacy.ml.models import build_Tok2Vec_model, build_tb_parser_model
-from spacy.ml.models import MultiHashEmbed, MaxoutWindowEncoder
-from spacy.schemas import ConfigSchema, ConfigSchemaPretrain
-from catalogue import RegistryError
-
 
 from ..util import make_tempdir
 
@@ -62,12 +72,66 @@ subword_features = true
 factory = "tagger"
 
 [components.tagger.model]
-@architectures = "spacy.Tagger.v1"
+@architectures = "spacy.Tagger.v2"
 
 [components.tagger.model.tok2vec]
 @architectures = "spacy.Tok2VecListener.v1"
 width = ${components.tok2vec.model.width}
 """
+
+distill_config_string = """
+[paths]
+train = null
+dev = null
+
+[corpora]
+
+[corpora.train]
+@readers = "spacy.Corpus.v1"
+path = ${paths.train}
+
+[corpora.dev]
+@readers = "spacy.Corpus.v1"
+path = ${paths.dev}
+
+[training]
+
+[training.batcher]
+@batchers = "spacy.batch_by_words.v1"
+size = 666
+
+[nlp]
+lang = "en"
+pipeline = ["tok2vec", "tagger"]
+
+[components]
+
+[components.tok2vec]
+factory = "tok2vec"
+
+[components.tok2vec.model]
+@architectures = "spacy.HashEmbedCNN.v1"
+pretrained_vectors = null
+width = 342
+depth = 4
+window_size = 1
+embed_size = 2000
+maxout_pieces = 3
+subword_features = true
+
+[components.tagger]
+factory = "tagger"
+
+[components.tagger.model]
+@architectures = "spacy.Tagger.v2"
+
+[components.tagger.model.tok2vec]
+@architectures = "spacy.Tok2VecListener.v1"
+width = ${components.tok2vec.model.width}
+
+[distill]
+"""
+
 
 pretrain_config_string = """
 [paths]
@@ -113,7 +177,7 @@ subword_features = true
 factory = "tagger"
 
 [components.tagger.model]
-@architectures = "spacy.Tagger.v1"
+@architectures = "spacy.Tagger.v2"
 
 [components.tagger.model.tok2vec]
 @architectures = "spacy.Tok2VecListener.v1"
@@ -125,33 +189,11 @@ width = ${components.tok2vec.model.width}
 
 parser_config_string_upper = """
 [model]
-@architectures = "spacy.TransitionBasedParser.v2"
+@architectures = "spacy.TransitionBasedParser.v3"
 state_type = "parser"
 extra_state_tokens = false
 hidden_width = 66
 maxout_pieces = 2
-use_upper = true
-
-[model.tok2vec]
-@architectures = "spacy.HashEmbedCNN.v1"
-pretrained_vectors = null
-width = 333
-depth = 4
-embed_size = 5555
-window_size = 1
-maxout_pieces = 7
-subword_features = false
-"""
-
-
-parser_config_string_no_upper = """
-[model]
-@architectures = "spacy.TransitionBasedParser.v2"
-state_type = "parser"
-extra_state_tokens = false
-hidden_width = 66
-maxout_pieces = 2
-use_upper = false
 
 [model.tok2vec]
 @architectures = "spacy.HashEmbedCNN.v1"
@@ -182,9 +224,27 @@ def my_parser():
         extra_state_tokens=True,
         hidden_width=65,
         maxout_pieces=5,
-        use_upper=True,
     )
     return parser
+
+
+@pytest.mark.issue(8190)
+def test_issue8190():
+    """Test that config overrides are not lost after load is complete."""
+    source_cfg = {
+        "nlp": {
+            "lang": "en",
+        },
+        "custom": {"key": "value"},
+    }
+    source_nlp = English.from_config(source_cfg)
+    with make_tempdir() as dir_path:
+        # We need to create a loadable source pipeline
+        source_path = dir_path / "test_model"
+        source_nlp.to_disk(source_path)
+        nlp = spacy.load(source_path, config={"custom": {"key": "updated_value"}})
+
+        assert nlp.config["custom"]["key"] == "updated_value"
 
 
 def test_create_nlp_from_config():
@@ -206,6 +266,14 @@ def test_create_nlp_from_config():
     with pytest.raises(ValueError):
         bad_cfg = {"pipeline": {"foo": "bar"}}
         load_model_from_config(Config(bad_cfg), auto_fill=True)
+
+
+def test_nlp_from_distillation_config():
+    """Test that the default distillation config validates properly"""
+    config = Config().from_str(distill_config_string)
+    distill_config = load_config(DEFAULT_CONFIG_DISTILL_PATH)
+    filled = config.merge(distill_config)
+    registry.resolve(filled["distillation"], schema=ConfigSchemaDistill)
 
 
 def test_create_nlp_from_pretraining_config():
@@ -269,15 +337,16 @@ def test_serialize_custom_nlp():
         nlp.to_disk(d)
         nlp2 = spacy.load(d)
         model = nlp2.get_pipe("parser").model
-        model.get_ref("tok2vec")
-        # check that we have the correct settings, not the default ones
-        assert model.get_ref("upper").get_dim("nI") == 65
-        assert model.get_ref("lower").get_dim("nI") == 65
+        assert model.get_ref("tok2vec") is not None
+        assert model.has_param("hidden_W")
+        assert model.has_param("hidden_b")
+        output = model.get_ref("output")
+        assert output is not None
+        assert output.has_param("W")
+        assert output.has_param("b")
 
 
-@pytest.mark.parametrize(
-    "parser_config_string", [parser_config_string_upper, parser_config_string_no_upper]
-)
+@pytest.mark.parametrize("parser_config_string", [parser_config_string_upper])
 def test_serialize_parser(parser_config_string):
     """Create a non-default parser config to check nlp serializes it correctly"""
     nlp = English()
@@ -290,11 +359,13 @@ def test_serialize_parser(parser_config_string):
         nlp.to_disk(d)
         nlp2 = spacy.load(d)
         model = nlp2.get_pipe("parser").model
-        model.get_ref("tok2vec")
-        # check that we have the correct settings, not the default ones
-        if model.attrs["has_upper"]:
-            assert model.get_ref("upper").get_dim("nI") == 66
-        assert model.get_ref("lower").get_dim("nI") == 66
+        assert model.get_ref("tok2vec") is not None
+        assert model.has_param("hidden_W")
+        assert model.has_param("hidden_b")
+        output = model.get_ref("output")
+        assert output is not None
+        assert output.has_param("b")
+        assert output.has_param("W")
 
 
 def test_config_nlp_roundtrip():
@@ -399,6 +470,55 @@ def test_config_overrides():
     assert nlp.pipe_names == ["tok2vec", "tagger"]
 
 
+@pytest.mark.filterwarnings("ignore:\\[W036")
+def test_config_overrides_registered_functions():
+    nlp = spacy.blank("en")
+    nlp.add_pipe("attribute_ruler")
+    with make_tempdir() as d:
+        nlp.to_disk(d)
+        nlp_re1 = spacy.load(
+            d,
+            config={
+                "components": {
+                    "attribute_ruler": {
+                        "scorer": {"@scorers": "spacy.tagger_scorer.v1"}
+                    }
+                }
+            },
+        )
+        assert (
+            nlp_re1.config["components"]["attribute_ruler"]["scorer"]["@scorers"]
+            == "spacy.tagger_scorer.v1"
+        )
+
+        @registry.misc("test_some_other_key")
+        def misc_some_other_key():
+            return "some_other_key"
+
+        nlp_re2 = spacy.load(
+            d,
+            config={
+                "components": {
+                    "attribute_ruler": {
+                        "scorer": {
+                            "@scorers": "spacy.overlapping_labeled_spans_scorer.v1",
+                            "spans_key": {"@misc": "test_some_other_key"},
+                        }
+                    }
+                }
+            },
+        )
+        assert nlp_re2.config["components"]["attribute_ruler"]["scorer"][
+            "spans_key"
+        ] == {"@misc": "test_some_other_key"}
+        # run dummy evaluation (will return None scores) in order to test that
+        # the spans_key value in the nested override is working as intended in
+        # the config
+        example = Example.from_dict(nlp_re2.make_doc("a b c"), {})
+        scores = nlp_re2.evaluate([example])
+        assert "spans_some_other_key_f" in scores
+
+
 def test_config_interpolation():
     config = Config().from_str(nlp_config_string, interpolate=False)
     assert config["corpora"]["train"]["path"] == "${paths.train}"
@@ -441,9 +561,7 @@ def test_config_auto_fill_extra_fields():
     load_model_from_config(nlp.config)
 
 
-@pytest.mark.parametrize(
-    "parser_config_string", [parser_config_string_upper, parser_config_string_no_upper]
-)
+@pytest.mark.parametrize("parser_config_string", [parser_config_string_upper])
 def test_config_validate_literal(parser_config_string):
     nlp = English()
     config = Config().from_str(parser_config_string)

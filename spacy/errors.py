@@ -1,4 +1,7 @@
 import warnings
+from typing import Literal
+
+from . import about
 
 
 class ErrorsWithCodes(type):
@@ -15,8 +18,8 @@ def setup_default_warnings():
     filter_warning("ignore", error_msg="numpy.dtype size changed")  # noqa
     filter_warning("ignore", error_msg="numpy.ufunc size changed")  # noqa
 
-    # warn about entity_ruler & matcher having no patterns only once
-    for pipe in ["matcher", "entity_ruler"]:
+    # warn about entity_ruler, span_ruler & matcher having no patterns only once
+    for pipe in ["matcher", "entity_ruler", "span_ruler"]:
         filter_warning("once", error_msg=Warnings.W036.format(name=pipe))
 
     # warn once about lemmatizer without required POS
@@ -26,7 +29,10 @@ def setup_default_warnings():
     filter_warning("once", error_msg="[W114]")
 
 
-def filter_warning(action: str, error_msg: str):
+def filter_warning(
+    action: Literal["default", "error", "ignore", "always", "module", "once"],
+    error_msg: str,
+):
     """Customize how spaCy should handle a certain warning.
 
     error_msg (str): e.g. "W006", or a full error message
@@ -78,7 +84,7 @@ class Warnings(metaclass=ErrorsWithCodes):
             "ignoring the duplicate entry.")
     W021 = ("Unexpected hash collision in PhraseMatcher. Matches may be "
             "incorrect. Modify PhraseMatcher._terminal_hash to fix.")
-    W024 = ("Entity '{entity}' - Alias '{alias}' combination already exists in "
+    W024 = ("Entity '{entity}' - alias '{alias}' combination already exists in "
             "the Knowledge Base.")
     W026 = ("Unable to set all sentence boundaries from dependency parses. If "
             "you are constructing a parse tree incrementally by setting "
@@ -99,13 +105,14 @@ class Warnings(metaclass=ErrorsWithCodes):
             "table. This may degrade the performance of the model to some "
             "degree. If this is intentional or the language you're using "
             "doesn't have a normalization table, please ignore this warning. "
-            "If this is surprising, make sure you have the spacy-lookups-data "
-            "package installed and load the table in your config. The "
-            "languages with lexeme normalization tables are currently: "
-            "{langs}\n\nLoad the table in your config with:\n\n"
+            "If this is surprising, make sure you are loading the table in "
+            "your config. The languages with lexeme normalization tables are "
+            "currently: {langs}\n\nAn example of how to load a table in "
+            "your config :\n\n"
             "[initialize.lookups]\n"
-            "@misc = \"spacy.LookupsDataLoader.v1\"\n"
+            "@misc = \"spacy.LookupsDataLoaderFromURL.v1\"\n"
             "lang = ${{nlp.lang}}\n"
+             f'url = "{about.__lookups_url__}"\n'
             "tables = [\"lexeme_norm\"]\n")
     W035 = ("Discarding subpattern '{pattern}' due to an unrecognized "
             "attribute or operator.")
@@ -127,13 +134,6 @@ class Warnings(metaclass=ErrorsWithCodes):
             "and make it independent. For example, `replace_listeners = "
             "[\"model.tok2vec\"]` See the documentation for details: "
             "https://spacy.io/usage/training#config-components-listeners")
-    W088 = ("The pipeline component {name} implements a `begin_training` "
-            "method, which won't be called by spaCy. As of v3.0, `begin_training` "
-            "has been renamed to `initialize`, so you likely want to rename the "
-            "component method. See the documentation for details: "
-            "https://spacy.io/api/language#initialize")
-    W089 = ("As of spaCy v3.0, the `nlp.begin_training` method has been renamed "
-            "to `nlp.initialize`.")
     W090 = ("Could not locate any {format} files in path '{path}'.")
     W091 = ("Could not clean/remove the temp directory at {dir}: {msg}.")
     W092 = ("Ignoring annotations for sentence starts, as dependency heads are set.")
@@ -191,6 +191,35 @@ class Warnings(metaclass=ErrorsWithCodes):
             "lead to errors.")
     W115 = ("Skipping {method}: the floret vector table cannot be modified. "
             "Vectors are calculated from character ngrams.")
+    W116 = ("Unable to clean attribute '{attr}'.")
+    W117 = ("No spans to visualize found in Doc object with spans_key: '{spans_key}'. If this is "
+            "surprising to you, make sure the Doc was processed using a model "
+            "that supports span categorization, and check the `doc.spans[spans_key]` "
+            "property manually if necessary.\n\nAvailable keys: {keys}")
+    W118 = ("Term '{term}' not found in glossary. It may however be explained in documentation "
+            "for the corpora used to train the language. Please check "
+            "`nlp.meta[\"sources\"]` for any relevant links.")
+    W119 = ("Overriding pipe name in `config` is not supported. Ignoring override '{name_in_config}'.")
+    W120 = ("Unable to load all spans in Doc.spans: more than one span group "
+            "with the name '{group_name}' was found in the saved spans data. "
+            "Only the last span group will be loaded under "
+            "Doc.spans['{group_name}']. Skipping span group with values: "
+            "{group_values}")
+    W121 = ("Attempting to trace non-existent method '{method}' in pipe '{pipe}'")
+    W122 = ("Couldn't trace method '{method}' in pipe '{pipe}'. This can happen if the pipe class "
+            "is a Cython extension type.")
+    W123 = ("Argument `enable` with value {enable} does not contain all values specified in the config option "
+            "`enabled` ({enabled}). Be aware that this might affect other components in your pipeline.")
+    W124 = ("{host}:{port} is already in use, using the nearest available port {serve_port} as an alternative.")
+    W125 = ("The StaticVectors key_attr is no longer used. To set a custom "
+            "key attribute for vectors, configure it through Vectors(attr=) or "
+            "'spacy init vectors --attr'")
+
+    # v4 warning strings
+    W400 = ("`use_upper=False` is ignored, the upper layer is always enabled")
+    W401 = ("`incl_prior is True`, but the selected knowledge base type {kb_type} doesn't support prior probability "
+            "lookups so this setting will be ignored. If your KB does support prior probability lookups, make sure "
+            "to return `True` in `.supports_prior_probs`.")
 
 
 class Errors(metaclass=ErrorsWithCodes):
@@ -209,8 +238,9 @@ class Errors(metaclass=ErrorsWithCodes):
             "initialized component.")
     E004 = ("Can't set up pipeline component: a factory for '{name}' already "
             "exists. Existing factory: {func}. New factory: {new_func}")
-    E005 = ("Pipeline component '{name}' returned None. If you're using a "
-            "custom component, maybe you forgot to return the processed Doc?")
+    E005 = ("Pipeline component '{name}' returned {returned_type} instead of a "
+            "Doc. If you're using a custom component, maybe you forgot to "
+            "return the processed Doc?")
     E006 = ("Invalid constraints for adding pipeline component. You can only "
             "set one of the following: before (component name or index), "
             "after (component name or index), first (True) or last (True). "
@@ -226,9 +256,7 @@ class Errors(metaclass=ErrorsWithCodes):
             "https://spacy.io/usage/models")
     E011 = ("Unknown operator: '{op}'. Options: {opts}")
     E012 = ("Cannot add pattern for zero tokens to matcher.\nKey: {key}")
-    E016 = ("MultitaskObjective target should be function or one of: dep, "
-            "tag, ent, dep_tag_offset, ent_tag.")
-    E017 = ("Can only add unicode or bytes. Got type: {value_type}")
+    E017 = ("Can only add 'str' inputs to StringStore. Got type: {value_type}")
     E018 = ("Can't retrieve string for hash '{hash_value}'. This usually "
             "refers to an issue with the `Vocab` or `StringStore`.")
     E019 = ("Can't create transition with unknown action ID: {action}. Action "
@@ -321,6 +349,11 @@ class Errors(metaclass=ErrorsWithCodes):
             "clear the existing vectors and resize the table.")
     E074 = ("Error interpreting compiled match pattern: patterns are expected "
             "to end with the attribute {attr}. Got: {bad_attr}.")
+    E079 = ("Error computing states in beam: number of predicted beams "
+            "({pbeams}) does not equal number of gold beams ({gbeams}).")
+    E080 = ("Duplicate state found in beam: {key}.")
+    E081 = ("Error getting gradient in beam: number of histories ({n_hist}) "
+            "does not equal number of losses ({losses}).")
     E082 = ("Error deprojectivizing parse: number of heads ({n_heads}), "
             "projective heads ({n_proj_heads}) and labels ({n_labels}) do not "
             "match.")
@@ -368,7 +401,7 @@ class Errors(metaclass=ErrorsWithCodes):
             "consider using doc.spans instead.")
     E106 = ("Can't find `doc._.{attr}` attribute specified in the underscore "
             "settings: {opts}")
-    E107 = ("Value of `doc._.{attr}` is not JSON-serializable: {value}")
+    E107 = ("Value of custom attribute `{attr}` is not JSON-serializable: {value}")
     E109 = ("Component '{name}' could not be run. Did you forget to "
             "call `initialize()`?")
     E110 = ("Invalid displaCy render wrapper. Expected callable, got: {obj}")
@@ -414,8 +447,7 @@ class Errors(metaclass=ErrorsWithCodes):
     E133 = ("The sum of prior probabilities for alias '{alias}' should not "
             "exceed 1, but found {sum}.")
     E134 = ("Entity '{entity}' is not defined in the Knowledge Base.")
-    E139 = ("Knowledge base for component '{name}' is empty. Use the methods "
-            "`kb.add_entity` and `kb.add_alias` to add entries.")
+    E139 = ("Knowledge base for component '{name}' is empty.")
     E140 = ("The list of entities, prior probabilities and entity vectors "
             "should be of equal length.")
     E141 = ("Entity vectors should be of length {required} instead of the "
@@ -436,13 +468,13 @@ class Errors(metaclass=ErrorsWithCodes):
             "same, but found '{nlp}' and '{vocab}' respectively.")
     E152 = ("The attribute {attr} is not supported for token patterns. "
             "Please use the option `validate=True` with the Matcher, PhraseMatcher, "
-            "or EntityRuler for more details.")
+            "SpanRuler or AttributeRuler for more details.")
     E153 = ("The value type {vtype} is not supported for token patterns. "
             "Please use the option validate=True with Matcher, PhraseMatcher, "
-            "or EntityRuler for more details.")
+            "SpanRuler or AttributeRuler for more details.")
     E154 = ("One of the attributes or values is not supported for token "
             "patterns. Please use the option `validate=True` with the Matcher, "
-            "PhraseMatcher, or EntityRuler for more details.")
+            "PhraseMatcher, or SpanRuler for more details.")
     E155 = ("The pipeline needs to include a {pipe} in order to use "
             "Matcher or PhraseMatcher with the attribute {attr}. "
             "Try using `nlp()` instead of `nlp.make_doc()` or `list(nlp.pipe())` "
@@ -466,7 +498,7 @@ class Errors(metaclass=ErrorsWithCodes):
             "Current DocBin: {current}\nOther DocBin: {other}")
     E169 = ("Can't find module: {module}")
     E170 = ("Cannot apply transition {name}: invalid for the current state.")
-    E171 = ("Matcher.add received invalid 'on_match' callback argument: expected "
+    E171 = ("{name}.add received invalid 'on_match' callback argument: expected "
             "callable or None, but got: {arg_type}")
     E175 = ("Can't remove rule for unknown match pattern ID: {key}")
     E176 = ("Alias '{alias}' is not defined in the Knowledge Base.")
@@ -482,7 +514,7 @@ class Errors(metaclass=ErrorsWithCodes):
             "components, since spans are only views of the Doc. Use Doc and "
             "Token attributes (or custom extension attributes) only and remove "
             "the following: {attrs}")
-    E181 = ("Received invalid attributes for unkown object {obj}: {attrs}. "
+    E181 = ("Received invalid attributes for unknown object {obj}: {attrs}. "
             "Only Doc and Token attributes are supported.")
     E182 = ("Received invalid attribute declaration: {attr}\nDid you forget "
             "to define the attribute? For example: `{attr}.???`")
@@ -514,15 +546,30 @@ class Errors(metaclass=ErrorsWithCodes):
     E198 = ("Unable to return {n} most similar vectors for the current vectors "
             "table, which contains {n_rows} vectors.")
     E199 = ("Unable to merge 0-length span at `doc[{start}:{end}]`.")
-    E200 = ("Can't yet set {attr} from Span. Vote for this feature on the "
-            "issue tracker: http://github.com/explosion/spaCy/issues")
+    E200 = ("Can't set {attr} from Span.")
     E202 = ("Unsupported {name} mode '{mode}'. Supported modes: {modes}.")
+    E203 = ("If the {name} embedding layer is not updated "
+            "during training, make sure to include it in 'annotating components'")
 
     # New errors added in v3.x
+    E850 = ("The PretrainVectors objective currently only supports default or "
+            "floret vectors, not {mode} vectors.")
+    E851 = ("The 'textcat' component labels should only have values of 0 or 1, "
+            "but found value of '{val}'.")
+    E852 = ("The tar file pulled from the remote attempted an unsafe path "
+            "traversal.")
+    E853 = ("Unsupported component factory name '{name}'. The character '.' is "
+            "not permitted in factory names.")
+    E854 = ("Unable to set doc.ents. Check that the 'ents_filter' does not "
+            "permit overlapping spans.")
+    E855 = ("Invalid {obj}: {obj} is not from the same doc.")
+    E856 = ("Error accessing span at position {i}: out of bounds in span group "
+            "of length {length}.")
+    E857 = ("Entry '{name}' not found in edit tree lemmatizer labels.")
     E858 = ("The {mode} vector table does not support this operation. "
             "{alternative}")
     E859 = ("The floret vector table cannot be modified.")
-    E860 = ("Can't truncate fasttext-bloom vectors.")
+    E860 = ("Can't truncate floret vectors.")
     E861 = ("No 'keys' should be provided when initializing floret vectors "
             "with 'minn' and 'maxn'.")
     E862 = ("'hash_count' must be between 1-4 for floret vectors.")
@@ -565,9 +612,6 @@ class Errors(metaclass=ErrorsWithCodes):
     E879 = ("Unexpected type for 'spans' data. Provide a dictionary mapping keys to "
             "a list of spans, with each span represented by a tuple (start_char, end_char). "
             "The tuple can be optionally extended with a label and a KB ID.")
-    E880 = ("The 'wandb' library could not be found - did you install it? "
-            "Alternatively, specify the 'ConsoleLogger' in the 'training.logger' "
-            "config section, instead of the 'WandbLogger'.")
     E884 = ("The pipeline could not be initialized because the vectors "
             "could not be found at '{vectors}'. If your pipeline was already "
             "initialized/trained before, call 'resume_training' instead of 'initialize', "
@@ -641,7 +685,7 @@ class Errors(metaclass=ErrorsWithCodes):
     E912 = ("Failed to initialize lemmatizer. Missing lemmatizer table(s) found "
             "for mode '{mode}'. Required tables: {tables}. Found: {found}.")
     E913 = ("Corpus path can't be None. Maybe you forgot to define it in your "
-            "config.cfg or override it on the CLI?")
+            ".cfg file or override it on the CLI?")
     E914 = ("Executing {name} callback failed. Expected the function to "
             "return the nlp object but got: {value}. Maybe you forgot to return "
             "the modified object in your function?")
@@ -681,11 +725,11 @@ class Errors(metaclass=ErrorsWithCodes):
             "need to modify the pipeline, use the built-in methods like "
             "`nlp.add_pipe`, `nlp.remove_pipe`, `nlp.disable_pipe` or "
             "`nlp.enable_pipe` instead.")
-    E927 = ("Can't write to frozen list Maybe you're trying to modify a computed "
+    E927 = ("Can't write to frozen list. Maybe you're trying to modify a computed "
             "property or default function argument?")
-    E928 = ("A KnowledgeBase can only be serialized to/from from a directory, "
+    E928 = ("An InMemoryLookupKB can only be serialized to/from from a directory, "
             "but the provided argument {loc} points to a file.")
-    E929 = ("Couldn't read KnowledgeBase from {loc}. The path does not seem to exist.")
+    E929 = ("Couldn't read InMemoryLookupKB from {loc}. The path does not seem to exist.")
     E930 = ("Received invalid get_examples callback in `{method}`. "
             "Expected function that returns an iterable of Example objects but "
             "got: {obj}")
@@ -693,13 +737,6 @@ class Errors(metaclass=ErrorsWithCodes):
             "method in component '{name}'. If you want to use this "
             "method, make sure it's overwritten on the subclass.")
     E940 = ("Found NaN values in scores.")
-    E941 = ("Can't find model '{name}'. It looks like you're trying to load a "
-            "model from a shortcut, which is obsolete as of spaCy v3.0. To "
-            "load the model, use its full name instead:\n\n"
-            "nlp = spacy.load(\"{full}\")\n\nFor more details on the available "
-            "models, see the models directory: https://spacy.io/models. If you "
-            "want to create a blank model, use spacy.blank: "
-            "nlp = spacy.blank(\"{name}\")")
     E942 = ("Executing `after_{name}` callback failed. Expected the function to "
             "return an initialized nlp object but got: {value}. Maybe "
             "you forgot to return the modified object in your function?")
@@ -713,7 +750,7 @@ class Errors(metaclass=ErrorsWithCodes):
             "loaded nlp object, but got: {source}")
     E947 = ("`Matcher.add` received invalid `greedy` argument: expected "
             "a string value from {expected} but got: '{arg}'")
-    E948 = ("`Matcher.add` received invalid 'patterns' argument: expected "
+    E948 = ("`{name}.add` received invalid 'patterns' argument: expected "
             "a list, but got: {arg_type}")
     E949 = ("Unable to align tokens for the predicted and reference docs. It "
             "is only possible to align the docs when both texts are the same "
@@ -887,16 +924,83 @@ class Errors(metaclass=ErrorsWithCodes):
     E1021 = ("`pos` value \"{pp}\" is not a valid Universal Dependencies tag. "
              "Non-UD tags should use the `tag` property.")
     E1022 = ("Words must be of type str or int, but input is of type '{wtype}'")
+    E1024 = ("A pattern with {attr_type} '{label}' is not present in "
+             "'{component}' patterns.")
+    E1025 = ("Cannot intify the value '{value}' as an IOB string. The only "
+             "supported values are: 'I', 'O', 'B' and ''")
+    E1026 = ("Edit tree has an invalid format:\n{errors}")
+    E1027 = ("AlignmentArray only supports slicing with a step of 1.")
+    E1028 = ("AlignmentArray only supports indexing using an int or a slice.")
+    E1029 = ("Edit tree cannot be applied to form.")
+    E1030 = ("Edit tree identifier out of range.")
+    E1031 = ("Could not find gold transition - see logs above.")
+    E1032 = ("Span {var} {value} is out of bounds for {obj} with length {length}.")
+    E1033 = ("Dimension {name} invalid -- only nO, nF, nP")
+    E1034 = ("Node index {i} out of bounds ({length})")
+    E1035 = ("Token index {i} out of bounds ({length})")
+    E1036 = ("Cannot index into NoneNode")
+    E1037 = ("Invalid attribute value '{attr}'.")
+    E1038 = ("Invalid JSON input: {message}")
+    E1039 = ("The {obj} start or end annotations (start: {start}, end: {end}) "
+             "could not be aligned to token boundaries.")
+    E1040 = ("Doc.from_json requires all tokens to have the same attributes. "
+             "Some tokens do not contain annotation for: {partial_attrs}")
+    E1041 = ("Expected a string, Doc, or bytes as input, but got: {type}")
+    E1042 = ("`enable={enable}` and `disable={disable}` are inconsistent with each other.\nIf you only passed "
+             "one of `enable` or `disable`, the other argument is specified in your pipeline's configuration.\nIn that "
+             "case pass an empty list for the previously not specified argument to avoid this error.")
+    E1043 = ("Expected None or a value in range [{range_start}, {range_end}] for entity linker threshold, but got "
+             "{value}.")
+    E1044 = ("Expected `candidates_batch_size` to be >= 1, but got: {value}")
+    E1045 = ("Encountered {parent} subclass without `{parent}.{method}` "
+             "method in '{name}'. If you want to use this method, make "
+             "sure it's overwritten on the subclass.")
+    E1046 = ("{cls_name} is an abstract class and cannot be instantiated. If you are looking for spaCy's default "
+             "knowledge base, use `InMemoryLookupKB`.")
+    E1047 = ("`find_threshold()` only supports components with a `scorer` attribute.")
+    E1048 = ("Got '{unexpected}' as console progress bar type, but expected one of the following: {expected}")
+    E1049 = ("No available port found for displaCy on host {host}. Please specify an available port "
+             "with `displacy.serve(doc, port=port)`")
+    E1050 = ("Port {port} is already in use. Please specify an available port with `displacy.serve(doc, port=port)` "
+             "or use `auto_select_port=True` to pick an available port automatically.")
+    E1051 = ("'allow_overlap' can only be False when max_positive is 1, but found 'max_positive': {max_positive}.")
+    E1052 = ("Unable to copy spans: the character offsets for the span at "
+             "index {i} in the span group do not align with the tokenization "
+             "in the target doc.")
+    E1053 = ("Both 'min_length' and 'max_length' should be larger than 0, but found"
+             " 'min_length': {min_length}, 'max_length': {max_length}")
+    E1054 = ("The text, including whitespace, must match between reference and "
+             "predicted docs when training {component}.")
+
+    # v4 error strings
+    E4000 = ("Expected a Doc as input, but got: '{type}'")
+    E4001 = ("Expected input to be one of the following types: ({expected_types}), "
+             "but got '{received_type}'")
+    E4002 = ("Pipe '{name}' requires a teacher pipe for distillation.")
+    E4003 = ("Training examples for distillation must have the exact same tokens in the "
+             "reference and predicted docs.")
+    E4004 = ("Backprop is not supported when is_train is not set.")
+    E4005 = ("EntityLinker_v1 is not supported in spaCy v4. Update your configuration.")
+    E4006 = ("Expected `entity_id` to be of type {exp_type}, but is of type {found_type}.")
+    E4007 = ("Span {var} {value} must be {op} Span {existing_var} "
+             "{existing_value}.")
+    E4008 = ("Span {pos}_char {value} does not correspond to a token {pos}.")
+    E4009 = ("The '{attr}' parameter should be 'None' or 'True', but found '{value}'.")
+    E4010 = ("Required lemmatizer table(s) {missing_tables} not found in "
+             "[initialize] or in registered lookups (spacy-lookups-data). An "
+             "example for how to load lemmatizer tables in [initialize]:\n\n"
+             "[initialize.components]\n\n"
+             "[initialize.components.{pipe_name}]\n\n"
+             "[initialize.components.{pipe_name}.lookups]\n"
+             '@misc = "spacy.LookupsDataLoaderFromURL.v1"\n'
+             "lang = ${{nlp.lang}}\n"
+             f'url = "{about.__lookups_url__}"\n'
+             "tables = {tables}\n"
+             "# or required tables only: tables = {required_tables}\n")
+    E4011 = ("Server error ({status_code}), couldn't fetch {url}")
 
 
-# Deprecated model shortcuts, only used in errors and warnings
-OLD_MODEL_SHORTCUTS = {
-    "en": "en_core_web_sm", "de": "de_core_news_sm", "es": "es_core_news_sm",
-    "pt": "pt_core_news_sm", "fr": "fr_core_news_sm", "it": "it_core_news_sm",
-    "nl": "nl_core_news_sm", "el": "el_core_news_sm", "nb": "nb_core_news_sm",
-    "lt": "lt_core_news_sm", "xx": "xx_ent_wiki_sm"
-}
-
+RENAMED_LANGUAGE_CODES = {"xx": "mul", "is": "isl"}
 
 # fmt: on
 

@@ -1,25 +1,40 @@
 # cython: embedsignature=True
 # Compiler crashes on memory view coercion without this. Should report bug.
-from cython.view cimport array as cvarray
-from libc.string cimport memset
 cimport numpy as np
+from libc.string cimport memset
+
 np.import_array()
+
+import warnings
 
 import numpy
 from thinc.api import get_array_module
-import warnings
 
+from .attrs cimport (
+    IS_ALPHA,
+    IS_ASCII,
+    IS_BRACKET,
+    IS_CURRENCY,
+    IS_DIGIT,
+    IS_LEFT_PUNCT,
+    IS_LOWER,
+    IS_PUNCT,
+    IS_QUOTE,
+    IS_RIGHT_PUNCT,
+    IS_SPACE,
+    IS_STOP,
+    IS_TITLE,
+    IS_UPPER,
+    LIKE_EMAIL,
+    LIKE_NUM,
+    LIKE_URL,
+)
 from .typedefs cimport attr_t, flags_t
-from .attrs cimport IS_ALPHA, IS_ASCII, IS_DIGIT, IS_LOWER, IS_PUNCT, IS_SPACE
-from .attrs cimport IS_TITLE, IS_UPPER, LIKE_URL, LIKE_NUM, LIKE_EMAIL, IS_STOP
-from .attrs cimport IS_BRACKET, IS_QUOTE, IS_LEFT_PUNCT, IS_RIGHT_PUNCT
-from .attrs cimport IS_CURRENCY
 
 from .attrs import intify_attrs
 from .errors import Errors, Warnings
 
-
-OOV_RANK = 0xffffffffffffffff # UINT64_MAX
+OOV_RANK = 0xffffffffffffffff  # UINT64_MAX
 memset(&EMPTY_LEXEME, 0, sizeof(LexemeC))
 EMPTY_LEXEME.id = OOV_RANK
 
@@ -41,7 +56,7 @@ cdef class Lexeme:
         """
         self.vocab = vocab
         self.orth = orth
-        self.c = <LexemeC*><void*>vocab.get_by_orth(vocab.mem, orth)
+        self.c = <LexemeC*><void*>vocab.get_by_orth(orth)
         if self.c.orth != orth:
             raise ValueError(Errors.E071.format(orth=orth, vocab_orth=self.c.orth))
 
@@ -89,7 +104,7 @@ cdef class Lexeme:
             if isinstance(value, float):
                 continue
             elif isinstance(value, (int, long)):
-                 Lexeme.set_struct_attr(self.c, attr, value)
+                Lexeme.set_struct_attr(self.c, attr, value)
             else:
                 Lexeme.set_struct_attr(self.c, attr, self.vocab.strings.add(value))
 
@@ -121,16 +136,20 @@ cdef class Lexeme:
         if hasattr(other, "orth"):
             if self.c.orth == other.orth:
                 return 1.0
-        elif hasattr(other, "__len__") and len(other) == 1 \
-        and hasattr(other[0], "orth"):
-            if self.c.orth == other[0].orth:
-                return 1.0
+        elif (
+            hasattr(other, "__len__") and len(other) == 1
+            and hasattr(other[0], "orth")
+            and self.c.orth == other[0].orth
+        ):
+            return 1.0
         if self.vector_norm == 0 or other.vector_norm == 0:
             warnings.warn(Warnings.W008.format(obj="Lexeme"))
             return 0.0
         vector = self.vector
         xp = get_array_module(vector)
-        return (xp.dot(vector, other.vector) / (self.vector_norm * other.vector_norm))
+        result = xp.dot(vector, other.vector) / (self.vector_norm * other.vector_norm)
+        # ensure we get a scalar back (numpy does this automatically but cupy doesn't)
+        return result.item()
 
     @property
     def has_vector(self):
@@ -171,19 +190,6 @@ cdef class Lexeme:
         def __set__(self, value):
             self.c.id = value
 
-    property sentiment:
-        """RETURNS (float): A scalar value indicating the positivity or
-            negativity of the lexeme."""
-        def __get__(self):
-            sentiment_table = self.vocab.lookups.get_table("lexeme_sentiment", {})
-            return sentiment_table.get(self.c.orth, 0.0)
-
-        def __set__(self, float x):
-            if "lexeme_sentiment" not in self.vocab.lookups:
-                self.vocab.lookups.add_table("lexeme_sentiment")
-            sentiment_table = self.vocab.lookups.get_table("lexeme_sentiment")
-            sentiment_table[self.c.orth] = x
-
     @property
     def orth_(self):
         """RETURNS (str): The original verbatim text of the lexeme
@@ -197,7 +203,7 @@ cdef class Lexeme:
         return self.orth_
 
     property lower:
-        """RETURNS (str): Lowercase form of the lexeme."""
+        """RETURNS (uint64): Lowercase form of the lexeme."""
         def __get__(self):
             return self.c.lower
 
